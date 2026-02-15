@@ -1,0 +1,420 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+model User {
+  id                 String                @id @default(cuid())
+  email              String                @unique
+  username           String?               @unique
+  password           String
+  name               String?
+  role               UserRole              @default(SHOP_OWNER)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  tenantId           String?
+  marketLimit        Int                   @default(2)
+  avatar             String?
+  emailVerified      Boolean               @default(false)
+  oauthProvider      OAuthProvider?
+  oauthProviderId    String?
+  setupCompleted     Boolean               @default(false)
+  recoveryId         String?               @unique
+  nationalId         String?
+  mustChangePassword Boolean               @default(false)
+  phone              String?               @unique
+  twoFactorSecret    String?
+  twoFactorEnabled   Boolean               @default(false)
+  twoFactorRecoveryCodes String?           @db.Text
+  auditLogs          AuditLog[]
+  loginAttempts      LoginAttempt[]
+  passwordResets     PasswordReset[]
+  rateLimits         RateLimit[]
+  refreshTokens      RefreshToken[]
+  securityEvents     SecurityEvent[]
+  sessions           Session[]
+  staffPermissions   StaffPermission[]
+  cloudinaryAccess   UserCloudinaryAccess?
+  userTenants        UserTenant[]
+  tenant             Tenant?               @relation("UserActiveTenant", fields: [tenantId], references: [id])
+
+  @@index([tenantId], map: "users_tenantId_fkey")
+  @@index([username])
+  @@map("users")
+}
+
+model Tenant {
+  id                   String                @id @default(cuid())
+  name                 String
+  logo                 String?
+  subdomain            String                @unique
+  plan                 PlanType              @default(STARTER)
+  status               Status                @default(ACTIVE)
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  isPrivateStore       Boolean               @default(false)
+  auditLogs            AuditLog[]
+  customers            Customer[]
+  merchantLimits       MerchantLimits?
+  merchantVerification MerchantVerification?
+  securityEvents       SecurityEvent[]
+  staffPermissions     StaffPermission[]
+  userTenants          UserTenant[]
+  users                User[]                @relation("UserActiveTenant")
+
+  @@map("tenants")
+}
+
+model RefreshToken {
+  id         String   @id @default(cuid())
+  token      String   @unique @db.VarChar(512)
+  userId     String?
+  customerId String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  user       User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "refresh_tokens_userId_fkey")
+  @@index([customerId])
+  @@map("refresh_tokens")
+}
+
+model LoginAttempt {
+  id            String    @id @default(cuid())
+  ipAddress     String
+  email         String
+  attempts      Int       @default(1)
+  lastAttemptAt DateTime  @default(now())
+  lockedUntil   DateTime?
+  userId        String?
+  user          User?     @relation(fields: [userId], references: [id])
+
+  @@unique([ipAddress, email])
+  @@index([userId], map: "login_attempts_userId_fkey")
+  @@map("login_attempts")
+}
+
+model PasswordReset {
+  id         String   @id @default(cuid())
+  email      String
+  code       String
+  expiresAt  DateTime
+  used       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  userId     String?
+  signupData String?  @db.LongText
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([email, code])
+  @@index([userId], map: "password_resets_userId_fkey")
+  @@map("password_resets")
+}
+
+model StaffPermission {
+  id         String   @id @default(cuid())
+  userId     String
+  tenantId   String
+  permission String
+  grantedAt  DateTime @default(now())
+  grantedBy  String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, tenantId, permission])
+  @@index([tenantId], map: "staff_permissions_tenantId_fkey")
+  @@map("staff_permissions")
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  tenantId     String?
+  action       String
+  resourceId   String?
+  resourceType String?
+  oldValues    String?  @db.LongText
+  newValues    String?  @db.LongText
+  ipAddress    String?
+  userAgent    String?
+  metadata     String?  @db.LongText
+  createdAt    DateTime @default(now())
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  user         User?    @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, action])
+  @@index([resourceType, resourceId])
+  @@index([createdAt])
+  @@index([userId], map: "audit_logs_userId_fkey")
+  @@map("audit_logs")
+}
+
+model RateLimit {
+  id          String        @id @default(cuid())
+  key         String
+  type        RateLimitType
+  attempts    Int           @default(1)
+  lastAttempt DateTime      @default(now())
+  expiresAt   DateTime
+  userId      String?
+  user        User?         @relation(fields: [userId], references: [id])
+
+  @@unique([key, type])
+  @@index([expiresAt])
+  @@index([type, lastAttempt])
+  @@index([userId], map: "rate_limits_userId_fkey")
+  @@map("rate_limits")
+}
+
+model SecurityEvent {
+  id          String            @id @default(cuid())
+  type        SecurityEventType
+  severity    SecuritySeverity
+  userId      String?
+  tenantId    String?
+  ipAddress   String?
+  userAgent   String?
+  description String
+  metadata    String?           @db.LongText
+  country     String?
+  countryCode String?
+  city        String?
+  region      String?
+  latitude    Float?
+  longitude   Float?
+  isp         String?
+  isVpn       Boolean           @default(false)
+  isProxy     Boolean           @default(false)
+  os          String?
+  browser     String?
+  device      String?
+  createdAt   DateTime          @default(now())
+  tenant      Tenant?           @relation(fields: [tenantId], references: [id])
+  user        User?             @relation(fields: [userId], references: [id])
+
+  @@index([type, severity])
+  @@index([createdAt])
+  @@index([tenantId], map: "security_events_tenantId_fkey")
+  @@index([userId], map: "security_events_userId_fkey")
+  @@map("security_events")
+}
+
+model MerchantVerification {
+  id             String       @id @default(cuid())
+  tenantId       String       @unique
+  documentType   DocumentType
+  documentNumber String
+  documentFront  String
+  documentBack   String?
+  businessName   String?
+  taxNumber      String?
+  status         KycStatus    @default(PENDING)
+  submittedAt    DateTime     @default(now())
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  reviewNotes    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+
+  @@map("merchant_verifications")
+}
+
+model MerchantLimits {
+  id                    String   @id @default(cuid())
+  tenantId              String   @unique
+  maxSinglePayment      Float    @default(5000)
+  maxDailyVolume        Float    @default(20000)
+  maxMonthlyVolume      Float    @default(100000)
+  allowedPaymentMethods String   @db.LongText
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  tenant                Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@map("merchant_limits")
+}
+
+model Customer {
+  id              String             @id @default(cuid())
+  tenantId        String
+  email           String
+  phone           String?
+  firstName       String?
+  lastName        String?
+  password        String?
+  recoveryId      String?            @unique
+  metadata        String?            @db.LongText
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  inviteExpiresAt DateTime?
+  inviteToken     String?            @unique
+  twoFactorSecret String?
+  twoFactorEnabled Boolean           @default(false)
+  twoFactorRecoveryCodes String?     @db.Text
+  employees       CustomerEmployee[]
+  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  refreshTokens   RefreshToken[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, createdAt])
+  @@index([email])
+  @@map("customers")
+}
+
+model CustomerEmployee {
+  id                 String                       @id @default(cuid())
+  customerId         String
+  email              String
+  name               String?
+  phone              String?
+  password           String
+  balance            Decimal                      @default(0.000000000000000000000000000000)
+  isActive           Boolean                      @default(true)
+  mustChangePassword Boolean                      @default(false)
+  createdAt          DateTime                     @default(now())
+  updatedAt          DateTime                     @updatedAt
+  permissions        CustomerEmployeePermission[]
+  customer           Customer                     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, email])
+  @@index([customerId])
+  @@index([email])
+  @@map("customer_employees")
+}
+
+model CustomerEmployeePermission {
+  id         String           @id @default(cuid())
+  employeeId String
+  permission String
+  grantedAt  DateTime         @default(now())
+  grantedBy  String
+  employee   CustomerEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, permission])
+  @@index([employeeId])
+  @@map("customer_employee_permissions")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model UserTenant {
+  id        String   @id @default(cuid())
+  userId    String
+  tenantId  String
+  createdAt DateTime @default(now())
+  isOwner   Boolean  @default(true)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+  @@index([userId])
+  @@index([tenantId])
+  @@map("user_tenants")
+}
+
+model UserCloudinaryAccess {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  hasAccess Boolean  @default(false)
+  grantedBy String?
+  grantedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([hasAccess])
+  @@map("user_cloudinary_access")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  SHOP_OWNER
+  STAFF
+  CUSTOMER
+}
+
+enum OAuthProvider {
+  GOOGLE
+  FACEBOOK
+  APPLE
+}
+
+enum PlanType {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum RateLimitType {
+  LOGIN
+  API
+  CHECKOUT
+  PAYMENT
+  PASSWORD_RESET
+  REGISTRATION
+}
+
+enum SecurityEventType {
+  SUCCESSFUL_LOGIN
+  FAILED_LOGIN_ATTEMPT
+  SUSPICIOUS_LOGIN
+  BRUTE_FORCE_ATTEMPT
+  FRAUD_ATTEMPT
+  RATE_LIMIT_EXCEEDED
+  UNUSUAL_ACTIVITY
+  SECURITY_BREACH
+  ACCOUNT_LOCKED
+  PASSWORD_RESET_ATTEMPT
+  INVALID_RESET_CODE
+  INVALID_REFRESH_TOKEN
+  DEVICE_FINGERPRINT
+  VM_DETECTED
+  HIGH_RISK_DEVICE
+  MULTIPLE_ACCOUNTS_ON_DEVICE
+  INVALID_2FA_CODE
+  TWO_FACTOR_SETUP
+  TWO_FACTOR_ENABLED
+  TWO_FACTOR_DISABLED
+  TWO_FACTOR_LOGIN
+}
+
+enum SecuritySeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DocumentType {
+  NATIONAL_ID
+  PASSPORT
+  DRIVING_LICENSE
+  BUSINESS_LICENSE
+}
+
+enum KycStatus {
+  PENDING
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+}
