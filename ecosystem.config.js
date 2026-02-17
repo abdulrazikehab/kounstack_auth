@@ -8,7 +8,7 @@ module.exports = {
       watch: false, // Don't watch in production
       env: {
         NODE_ENV: 'production',
-        PORT: 3002, // Adjust if needed
+        CORE_PORT: 3001,
       },
     },
   ],
