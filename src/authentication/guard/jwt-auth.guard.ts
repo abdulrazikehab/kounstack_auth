@@ -135,18 +135,52 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     } catch (error: any) {
       if (error instanceof UnauthorizedException) throw error;
       
-      this.logger.warn(`JWT validation failed: ${error.message}`);
+      // Enhanced error logging
+      const errorName = error?.name || 'Unknown';
+      const errorMessage = error?.message || 'No message';
+      const authHeader = request.headers.authorization;
+      const hasAuthHeader = !!authHeader;
+      const hasCookies = !!request.cookies;
+      const cookieNames = request.cookies ? Object.keys(request.cookies) : [];
+      const hasAccessTokenCookie = !!request?.cookies?.accessToken;
+      
+      this.logger.error(
+        `JWT validation failed in auth service: ${errorName} - ${errorMessage} | ` +
+        `hasAuthHeader: ${hasAuthHeader}, hasCookies: ${hasCookies}, ` +
+        `cookieNames: [${cookieNames.join(', ')}], hasAccessTokenCookie: ${hasAccessTokenCookie} | ` +
+        `endpoint: ${request.url}, method: ${request.method} | ` +
+        `host: ${request.headers.host}, origin: ${request.headers.origin || 'none'}`
+      );
       
       if (error.name === 'JsonWebTokenError') {
          if (error.message?.includes('invalid signature')) {
+            this.logger.error(
+              '🚨 CRITICAL: JWT signature verification failed in auth service - JWT_SECRET mismatch detected! ' +
+              'The JWT_SECRET used to sign tokens does NOT match the JWT_SECRET ' +
+              'used to verify tokens. Ensure JWT_SECRET environment variable is identical in all services.'
+            );
             throw new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
          }
          if (error.message?.includes('jwt expired')) {
+            this.logger.debug('JWT token has expired in auth service');
             throw new UnauthorizedException('انتهت صلاحية جلسة المستخدم - يرجى تسجيل الدخول مرة أخرى');
          }
-         throw new UnauthorizedException('رمز المصادقة غير صالح - يرجى تسجيل الدخول مرة أخرى');
+         if (error.message?.includes('jwt malformed')) {
+            this.logger.warn('JWT token is malformed in auth service');
+            throw new UnauthorizedException('رمز المصادقة غير صالح - يرجى تسجيل الدخول مرة أخرى');
+         }
+         if (error.message?.includes('jwt must be provided')) {
+            this.logger.warn('JWT token was not provided in request to auth service');
+            throw new UnauthorizedException('رمز المصادقة مطلوب - يرجى تسجيل الدخول');
+         }
+         this.logger.error(`Unhandled JsonWebTokenError in auth service: ${errorMessage}`);
+         throw new UnauthorizedException(`فشل المصادقة: ${error.message || 'رمز غير صالح'}`);
       }
       
+      this.logger.error(
+        `Unexpected authentication error in auth service: ${errorName} - ${errorMessage} | ` +
+        `Stack: ${error?.stack?.substring(0, 300)}...`
+      );
       throw new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
     }
   }
