@@ -2443,13 +2443,20 @@ export class AuthService {
         }
       }
 
-      // Truncate description to prevent database errors (max 500 chars for safety)
-      const maxDescriptionLength = 500;
+      // Truncate description and userAgent to prevent database errors
+      // MySQL VARCHAR(255) is common, so use 250 chars to be safe
+      const maxDescriptionLength = 250;
+      const maxUserAgentLength = 500; // userAgent can be longer
+      
       const truncatedDescription = description 
         ? (description.length > maxDescriptionLength 
             ? description.substring(0, maxDescriptionLength - 3) + '...' 
             : description)
         : `Security event: ${type}`;
+      
+      const truncatedUserAgent = userAgent && userAgent.length > maxUserAgentLength
+        ? userAgent.substring(0, maxUserAgentLength - 3) + '...'
+        : userAgent;
 
       await this.prismaService.securityEvent.create({
         data: {
@@ -2458,7 +2465,7 @@ export class AuthService {
           userId: userId || undefined,
           tenantId: tenantId || undefined,
           ipAddress: ipAddress || undefined,
-          userAgent: userAgent || undefined,
+          userAgent: truncatedUserAgent || undefined,
           description: truncatedDescription,
           metadata: metadata ? JSON.stringify(metadata) : undefined,
           // Geolocation fields
