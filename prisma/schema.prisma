@@ -179,7 +179,7 @@ model SecurityEvent {
   tenantId    String?
   ipAddress   String?
   userAgent   String?
-  description String
+  description String            @db.Text
   metadata    String?           @db.LongText
   country     String?
   countryCode String?

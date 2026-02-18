@@ -174,7 +174,9 @@ async function bootstrap() {
       ],
       exposedHeaders: [
         'Content-Type',
-        'Authorization'
+        'Authorization',
+        'X-Session-ID',
+        'x-session-id'
       ],
       preflightContinue: false,
       optionsSuccessStatus: 204,
