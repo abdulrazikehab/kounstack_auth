@@ -1806,49 +1806,93 @@ export class AuthService {
 
   /**
    * Change password for authenticated users (used for first login and regular password changes)
+   *
+   * Supports:
+   * - Platform users in the `User` table (SHOP_OWNER, STAFF, etc.)
+   * - Customer employees in the `CustomerEmployee` table (CUSTOMER_EMPLOYEE role)
+   *   whose JWT subject is the employee id.
    */
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<{ message: string }> {
     try {
-      // Get user
+      // 1) Try regular platform user first
       const user = await this.prismaService.user.findUnique({
         where: { id: userId },
       });
 
-      if (!user) {
+      if (user) {
+        // Verify current password (if mustChangePassword is false, require current password)
+        // If mustChangePassword is true, allow change without current password (first login)
+        if (!user.mustChangePassword) {
+          const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+          if (!isCurrentPasswordValid) {
+            throw new BadRequestException('Current password is incorrect');
+          }
+        } else {
+          // For first login, verify the temporary password
+          const isTemporaryPasswordValid = await bcrypt.compare(currentPassword, user.password);
+          if (!isTemporaryPasswordValid) {
+            throw new BadRequestException('Temporary password is incorrect');
+          }
+        }
+
+        // SECURITY FIX: Validate password against policy
+        validatePasswordOrThrow(newPassword, undefined, { email: user.email, username: user.username });
+
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+        // Update password and clear mustChangePassword flag
+        await this.prismaService.user.update({
+          where: { id: userId },
+          data: {
+            password: hashedPassword,
+            mustChangePassword: false, // Clear the flag after password change
+          },
+        });
+
+        this.logger.log(`✅ Password changed successfully for user: ${user.email}`);
+        return { message: 'Password changed successfully' };
+      }
+
+      // 2) If not a platform user, try CustomerEmployee (B2B store employees)
+      const employee = await this.prismaService.customerEmployee.findUnique({
+        where: { id: userId },
+      });
+
+      if (!employee) {
+        // Neither a User nor a CustomerEmployee – keep previous behaviour
         throw new NotFoundException('User not found');
       }
 
-      // Verify current password (if mustChangePassword is false, require current password)
-      // If mustChangePassword is true, allow change without current password (first login)
-      if (!user.mustChangePassword) {
-        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+      // For employees we apply the same rules:
+      // - If mustChangePassword is false, require the current password
+      // - If mustChangePassword is true, treat currentPassword as the temporary password
+      if (!employee.mustChangePassword) {
+        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, employee.password);
         if (!isCurrentPasswordValid) {
           throw new BadRequestException('Current password is incorrect');
         }
       } else {
-        // For first login, verify the temporary password
-        const isTemporaryPasswordValid = await bcrypt.compare(currentPassword, user.password);
+        const isTemporaryPasswordValid = await bcrypt.compare(currentPassword, employee.password);
         if (!isTemporaryPasswordValid) {
           throw new BadRequestException('Temporary password is incorrect');
         }
       }
 
-      // SECURITY FIX: Validate password against policy
-      validatePasswordOrThrow(newPassword, undefined, { email: user.email, username: user.username });
+      // Validate new password using the same policy (we only have email for employees)
+      validatePasswordOrThrow(newPassword, undefined, { email: employee.email });
 
-      // Hash new password
       const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-      // Update password and clear mustChangePassword flag
-      await this.prismaService.user.update({
+      await this.prismaService.customerEmployee.update({
         where: { id: userId },
         data: {
           password: hashedPassword,
-          mustChangePassword: false, // Clear the flag after password change
+          mustChangePassword: false,
         },
       });
 
-      this.logger.log(`✅ Password changed successfully for user: ${user.email}`);
+      this.logger.log(`✅ Password changed successfully for customer employee: ${employee.email}`);
       return { message: 'Password changed successfully' };
     } catch (error: any) {
       this.logger.error(`❌ Password change failed: ${error.message}`);
