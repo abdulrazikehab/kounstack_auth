@@ -2339,6 +2339,11 @@ export class AuthService {
 
     // 3. Multiple Accounts Check
     if (relatedEmails.length > 3) {
+            // Truncate email list in description to prevent database errors
+            const emailList = relatedEmails.length > 10 
+              ? relatedEmails.slice(0, 10).join(', ') + ` and ${relatedEmails.length - 10} more`
+              : relatedEmails.join(', ');
+            
             await this.logSecurityEvent(
             'MULTIPLE_ACCOUNTS_ON_DEVICE',
             'CRITICAL',
@@ -2346,7 +2351,7 @@ export class AuthService {
             tenantId,
             ip,
             userAgent,
-            `Device used by ${relatedEmails.length} different emails: ${relatedEmails.join(', ')}`,
+            `Device used by ${relatedEmails.length} different emails: ${emailList}`,
             { fingerprint, emails: relatedEmails }
         );
     }
@@ -2438,6 +2443,14 @@ export class AuthService {
         }
       }
 
+      // Truncate description to prevent database errors (max 500 chars for safety)
+      const maxDescriptionLength = 500;
+      const truncatedDescription = description 
+        ? (description.length > maxDescriptionLength 
+            ? description.substring(0, maxDescriptionLength - 3) + '...' 
+            : description)
+        : `Security event: ${type}`;
+
       await this.prismaService.securityEvent.create({
         data: {
           type,
@@ -2446,7 +2459,7 @@ export class AuthService {
           tenantId: tenantId || undefined,
           ipAddress: ipAddress || undefined,
           userAgent: userAgent || undefined,
-          description: description || `Security event: ${type}`,
+          description: truncatedDescription,
           metadata: metadata ? JSON.stringify(metadata) : undefined,
           // Geolocation fields
           country: geoData.country,
