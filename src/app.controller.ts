@@ -28,6 +28,61 @@ export class AppController {
     };
   }
 
+  @Get('health/email/test')
+  @SkipThrottle()
+  async testEmail() {
+    try {
+      const testEmail = process.env.TEST_EMAIL || 'abdelrazikehab7@gmail.com';
+      const resendApiKey = process.env.RESEND_API_KEY;
+      
+      if (!resendApiKey) {
+        return {
+          success: false,
+          error: 'RESEND_API_KEY not configured',
+        };
+      }
+
+      const { Resend } = await import('resend');
+      const resend = new Resend(resendApiKey);
+      
+      const fromEmail = process.env.RESEND_FROM || 'no-reply@kounworld.com';
+      
+      const result: any = await (resend as any).emails.send({
+        from: `Test <${fromEmail}>`,
+        to: testEmail,
+        subject: 'Test Email from Kounstack',
+        html: '<h1>Test Email</h1><p>If you receive this, Resend is working correctly!</p>',
+      });
+
+      if (!result || result.error) {
+        const errorMsg = result?.error?.message || 'Unknown Resend error or empty response';
+        return {
+          success: false,
+          error: errorMsg,
+          details: result?.error || result,
+        };
+      }
+
+      return {
+        success: true,
+        message: 'Test email sent successfully',
+        messageId: result.id || result.data?.id || 'resend',
+        from: fromEmail,
+        to: testEmail,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message || String(error),
+        details: {
+          code: error.code,
+          statusCode: error.statusCode,
+          response: error.response || error.data,
+        },
+      };
+    }
+  }
+
   @Get('health/email')
   @SkipThrottle()
   emailHealth() {

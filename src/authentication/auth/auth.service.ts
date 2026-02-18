@@ -252,13 +252,22 @@ export class AuthService {
       }
 
       const overallSuccess = emailSent || smsSent;
+      const isProduction = process.env.NODE_ENV === 'production' || 
+                          process.env.NODE_ENV === 'prod' ||
+                          !process.env.NODE_ENV || 
+                          (process.env.NODE_ENV !== 'development' && process.env.NODE_ENV !== 'dev');
+      
+      // Log environment detection
+      this.logger.log(`📧 Email sending result: emailSent=${emailSent}, smsSent=${smsSent}, overallSuccess=${overallSuccess}`);
+      this.logger.log(`📧 Environment: NODE_ENV=${process.env.NODE_ENV}, isProduction=${isProduction}`);
       
       // In production, if both fail, cleanup and throw error
-      if (!overallSuccess && process.env.NODE_ENV !== 'development') {
+      if (!overallSuccess && isProduction) {
          await this.prismaService.passwordReset.deleteMany({ where: { email, code: signupCode } });
          this.pendingSignups.delete(`${email}_${verificationCode}`);
          const errorMessage = emailError instanceof Error ? emailError.message : 'Email and SMS services are unavailable';
          this.logger.error(`❌ Production mode: Blocking signup due to notification failure: ${errorMessage}`);
+         this.logger.error(`❌ Email configuration check: RESEND_API_KEY=${!!process.env.RESEND_API_KEY}, SMTP_USER=${!!process.env.SMTP_USER}, SMTP_PASS=${!!process.env.SMTP_PASS}`);
          throw new BadRequestException(`Cannot send verification code at this time. Please try again later or contact support.`);
       }
 
@@ -277,9 +286,29 @@ export class AuthService {
             response.previewUrl = emailResult.previewUrl;
           }
         }
-      } else if (!emailSent && process.env.NODE_ENV === 'development') {
-        // Email failed but we're in development
-        response.emailWarning = 'Email sending failed. Use the verification code below to complete signup.';
+      } else if (!emailSent) {
+        // Email failed - provide diagnostic information
+        if (process.env.NODE_ENV === 'development') {
+          response.emailWarning = 'Email sending failed. Use the verification code below to complete signup.';
+        } else {
+          // In production, provide helpful diagnostic information
+          const hasResend = !!process.env.RESEND_API_KEY;
+          const hasSmtp = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
+          
+          response.emailWarning = 'Email sending failed. Please contact support.';
+          response.emailDiagnostic = {
+            resendConfigured: hasResend,
+            smtpConfigured: hasSmtp,
+            error: emailError instanceof Error ? emailError.message : 'Unknown error',
+            recommendation: !hasResend && !hasSmtp
+              ? 'Email service not configured. Check RESEND_API_KEY or SMTP credentials.'
+              : !hasResend
+              ? 'Resend API not configured. Check SMTP credentials.'
+              : !hasSmtp
+              ? 'SMTP fallback not configured. Check Resend API key.'
+              : 'Both services configured but failed. Check server logs for details.',
+          };
+        }
       }
 
       // Always include verification code in development (even if email failed)
