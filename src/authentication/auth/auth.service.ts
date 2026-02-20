@@ -909,7 +909,7 @@ export class AuthService {
         }
 
         // Get Customer (Employer)
-        const customer = await this.prismaService.user.findUnique({
+        const customer = await this.prismaService.customer.findUnique({
              where: { id: employee.customerId },
              include: { tenant: true }
         });
