@@ -83,7 +83,7 @@ async function bootstrap() {
           // Validate origin
           if (
             allowedOriginsList.includes(origin) ||
-            /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net)$/.test(origin) ||
+            /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net|kounworld\.com)$/.test(origin) ||
             process.env.NODE_ENV === 'development'
           ) {
             res.setHeader('Access-Control-Allow-Origin', origin);
@@ -131,7 +131,7 @@ async function bootstrap() {
         }
 
         // Allow subdomains of kawn.com and kawn.net and kounworld.com and saeaa.net
-        const isAllowedSubdomain = /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net)$/.test(origin);
+        const isAllowedSubdomain = /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net|kounworld\.com)$/.test(origin);
         if (isAllowedSubdomain) {
           return callback(null, origin);
         }
@@ -235,7 +235,7 @@ async function bootstrap() {
           const allowedOrigins = process.env.CORS_ORIGINS?.split(',').map(o => o.trim()) || [];
           
           // Enhanced regex: Allow paths, ports, and subdomains
-          const kawnDomainRegex = /^https?:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|koun\.com|koun\.net|kawn\.com|kawn\.net)([:/].*)?$/;
+          const kawnDomainRegex = /^https?:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|koun\.com|koun\.net|kawn\.com|kawn\.net|kounworld\.com)([:/].*)?$/;
           
           const isAllowed = allowedOrigins.some(allowed => source.startsWith(allowed)) || 
                            kawnDomainRegex.test(source);
@@ -300,7 +300,7 @@ async function bootstrap() {
       const origin = req.headers.origin;
       if (origin) {
          // Re-check against allowed list to be safe, or just echo back in dev
-        if (allowedOriginsList.includes(origin) || process.env.NODE_ENV === 'development' || /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net)$/.test(origin)) {
+        if (allowedOriginsList.includes(origin) || process.env.NODE_ENV === 'development' || /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net|kounworld\.com)$/.test(origin)) {
            res.setHeader('Access-Control-Allow-Origin', origin);
            res.setHeader('Access-Control-Allow-Credentials', 'true');
         }
