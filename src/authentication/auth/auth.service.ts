@@ -894,7 +894,7 @@ export class AuthService {
 
     // Check if it's a Customer Employee if no User found
     if (!user && email) {
-      const employee = await this.prismaService.customerEmployee.findUnique({
+      const employee = await this.prismaService.customerEmployee.findFirst({
         where: { email },
         include: { permissions: true }
       });
