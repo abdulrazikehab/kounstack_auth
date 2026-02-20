@@ -26,18 +26,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let message: string | object = 'Internal server error';
     let stack: string | undefined;
 
-    if (exception instanceof HttpException) {
-      status = exception.getStatus();
-      const exceptionResponse = exception.getResponse();
-      message = typeof exceptionResponse === 'string' 
-        ? exceptionResponse 
-        : exceptionResponse;
-    } else if (exception instanceof Error) {
-      message = exception.message;
-      stack = exception.stack;
+    try {
+      if (exception instanceof HttpException) {
+        status = exception.getStatus();
+        const exceptionResponse = exception.getResponse();
+        message = typeof exceptionResponse === 'string' 
+          ? exceptionResponse 
+          : exceptionResponse;
+      } else if (exception instanceof Error) {
+        message = exception.message;
+        stack = exception.stack;
+      } else {
+        message = String(exception);
+      }
+    } catch (parseError) {
+      this.logger.error('Error parsing exception:', parseError);
+      message = 'An unknown error occurred';
     }
 
-    // Save error to database
+    // Save error to database (non-blocking - don't let this fail the error response)
     try {
       const user = (request as any).user;
       // Get tenantId and validate it exists (or set to undefined to avoid FK constraint violation)
@@ -60,41 +67,76 @@ export class AllExceptionsFilter implements ExceptionFilter {
         }
       }
       
-      await this.prisma.auditLog.create({
-        data: {
-          userId: user?.id || user?.sub || undefined,
-          tenantId: tenantId,
-          action: 'ERROR',
-          resourceType: 'SYSTEM',
-          resourceId: status.toString(),
-          oldValues: null,
-          newValues: null,
-          ipAddress: request.ip || request.connection?.remoteAddress || undefined,
-          userAgent: request.headers['user-agent'] || undefined,
-          metadata: JSON.stringify({
-            severity: status >= 500 ? 'CRITICAL' : status >= 400 ? 'HIGH' : 'MEDIUM',
-            message: typeof message === 'string' ? message : JSON.stringify(message),
-            stack,
-            method: request.method,
-            path: (request as any).originalUrl || request.url || request.path,
-            statusCode: status,
-          }),
-        },
+      // Use Promise.resolve().then() to make this truly non-blocking
+      Promise.resolve().then(async () => {
+        try {
+          await this.prisma.auditLog.create({
+            data: {
+              userId: user?.id || user?.sub || undefined,
+              tenantId: tenantId,
+              action: 'ERROR',
+              resourceType: 'SYSTEM',
+              resourceId: status.toString(),
+              oldValues: null,
+              newValues: null,
+              ipAddress: request.ip || request.connection?.remoteAddress || undefined,
+              userAgent: request.headers['user-agent'] || undefined,
+              metadata: JSON.stringify({
+                severity: status >= 500 ? 'CRITICAL' : status >= 400 ? 'HIGH' : 'MEDIUM',
+                message: typeof message === 'string' ? message : JSON.stringify(message),
+                stack,
+                method: request.method,
+                path: (request as any).originalUrl || request.url || request.path,
+                statusCode: status,
+              }),
+            },
+          });
+        } catch (dbError) {
+          // Silent fail - don't break error response if logging fails
+          this.logger.warn('Failed to save error to audit log:', dbError);
+        }
+      }).catch(() => {
+        // Ignore any errors in the async logging
       });
     } catch (error) {
       // Silent fail - don't break error response if logging fails
-      this.logger.warn('Failed to save error to audit log:', error);
+      this.logger.warn('Failed to prepare error audit log:', error);
     }
 
     // Get the actual request path (use originalUrl if available, otherwise url)
     const requestPath = (request as any).originalUrl || request.url || request.path;
 
+    // LOG THE ACTUAL ERROR BEFORE SANITIZATION (for debugging)
+    this.logger.error(`❌ Exception caught:`, {
+      status,
+      message: typeof message === 'string' ? message : JSON.stringify(message),
+      stack,
+      method: request.method,
+      path: requestPath,
+      url: request.url,
+      headers: {
+        'x-tenant-domain': request.headers['x-tenant-domain'],
+        'x-tenant-id': request.headers['x-tenant-id'],
+        'x-subdomain': request.headers['x-subdomain'],
+        host: request.headers.host,
+      },
+      body: request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH' 
+        ? (request.body ? JSON.stringify(request.body).substring(0, 500) : 'no body')
+        : undefined,
+    });
+
     // SECURITY FIX: Sanitize error messages to prevent information leakage
-    // Apply for both production and user-facing requirements
-    const isProduction = process.env.NODE_ENV === 'production' || true; // Force strict mode for "NEVER expose technical errors" requirement
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isDevelopment = !isProduction;
     let safeMessage: string | object = message;
 
-    if (isProduction || status >= 500) {
+    // Preserve messages from HttpExceptions (BadRequestException, NotFoundException, etc.)
+    // These are already user-friendly and should be shown to users
+    // In development, also preserve 500-level HttpException messages for debugging
+    const isHttpException = exception instanceof HttpException;
+    const shouldPreserveMessage = isHttpException && (status < 500 || isDevelopment);
+
+    if (!shouldPreserveMessage && (isProduction || status >= 500)) {
       // Never expose stack traces or internal paths for 500+ errors
       if (typeof message === 'string') {
         // Remove stack traces, file paths, and technical details
@@ -117,10 +159,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
         safeMessage = sanitized;
       }
       
-      // Generic messages for 500 errors
-      // User Rule: "The service is temporarily unavailable..."
-      if (status >= 500) {
+      // Generic messages for 500 errors (only for non-HttpExceptions or in production)
+      // In development, preserve the sanitized message for debugging
+      if (status >= 500 && isProduction) {
         safeMessage = 'The service is temporarily unavailable. Please try again later.';
+      } else if (status >= 500 && isDevelopment) {
+        // In development, include the sanitized error message for debugging
+        // but still use generic message as fallback if sanitization removed everything
+        if (typeof safeMessage === 'string' && safeMessage.trim().length === 0) {
+          safeMessage = 'The service is temporarily unavailable. Please try again later.';
+        }
       }
     }
 

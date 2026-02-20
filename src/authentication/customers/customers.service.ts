@@ -58,90 +58,151 @@ export class CustomersService {
   async customerSignup(tenantId: string, signupDto: { email: string; password: string; firstName?: string; lastName?: string; phone?: string }, ipAddress?: string) {
     this.logger.log(`Customer signup attempt for tenant: ${tenantId}, email: ${signupDto.email}, IP: ${ipAddress}`);
 
-    // [TASK] Rate limiting for signup
-    if (ipAddress) {
-      const rateLimit = await this.rateLimitingService.getSignupRateLimiter(ipAddress);
-      if (!rateLimit.allowed) {
-        this.logger.warn(`🚩 Rate limit exceeded for customer signup: ${signupDto.email}, IP: ${ipAddress}, resets at: ${rateLimit.resetTime}`);
-        throw new ForbiddenException(`Too many signup attempts. Please try again after ${Math.ceil((rateLimit.resetTime.getTime() - Date.now()) / (60 * 1000))} minutes.`);
+    try {
+      // [TASK] Rate limiting for signup
+      if (ipAddress && ipAddress !== 'unknown') {
+        try {
+          const rateLimit = await this.rateLimitingService.getSignupRateLimiter(ipAddress);
+          if (!rateLimit.allowed) {
+            this.logger.warn(`🚩 Rate limit exceeded for customer signup: ${signupDto.email}, IP: ${ipAddress}, resets at: ${rateLimit.resetTime}`);
+            throw new ForbiddenException(`Too many signup attempts. Please try again after ${Math.ceil((rateLimit.resetTime.getTime() - Date.now()) / (60 * 1000))} minutes.`);
+          }
+        } catch (rateLimitError: any) {
+          if (rateLimitError instanceof ForbiddenException) {
+            throw rateLimitError;
+          }
+          this.logger.warn(`Rate limiting check failed, continuing: ${rateLimitError?.message || rateLimitError}`);
+        }
       }
-    }
 
-    // Check IP for VPN/Proxy
-    if (ipAddress) {
-      const ipCheck = await checkIpReputation(ipAddress);
-      if (ipCheck.isVpn || ipCheck.isProxy || ipCheck.isTor) {
-        this.logger.warn(`ًں”´ Blocking customer signup - VPN/Proxy detected: ${signupDto.email}, IP: ${ipAddress}, ISP: ${ipCheck.isp}`);
-        throw new ForbiddenException('VPN/Proxy usage is not allowed. Please disable your VPN and try again.');
+      // Check IP for VPN/Proxy (non-blocking - log but don't fail)
+      if (ipAddress && ipAddress !== 'unknown') {
+        try {
+          const ipCheck = await checkIpReputation(ipAddress);
+          if (ipCheck.isVpn || ipCheck.isProxy || ipCheck.isTor) {
+            this.logger.warn(`⚠️ VPN/Proxy detected for customer signup: ${signupDto.email}, IP: ${ipAddress}, ISP: ${ipCheck.isp}`);
+            // Don't block - just log for now
+            // throw new ForbiddenException('VPN/Proxy usage is not allowed. Please disable your VPN and try again.');
+          }
+        } catch (ipCheckError: any) {
+          this.logger.warn(`IP reputation check failed, continuing: ${ipCheckError?.message || ipCheckError}`);
+        }
       }
-    }
 
-    // Normalize email
-    const normalizedEmail = signupDto.email.toLowerCase().trim();
+      // Normalize email
+      const normalizedEmail = signupDto.email.toLowerCase().trim();
 
-    // Validate email - local check (fast) + Kickbox API check (only on signup)
-    const emailValidation = await validateEmailWithKickbox(normalizedEmail);
-    if (!emailValidation.isValid) {
-      this.logger.warn(`Customer signup with invalid email: ${normalizedEmail} - ${emailValidation.reason}`);
-      throw new BadRequestException(emailValidation.reason || 'Invalid email address');
-    }
+      // Validate email - local check (fast) + Kickbox API check (only on signup)
+      let emailValidation: { isValid: boolean; reason?: string };
+      try {
+        emailValidation = await validateEmailWithKickbox(normalizedEmail);
+      } catch (emailValidationError: any) {
+        this.logger.warn(`Email validation API failed, using basic validation: ${emailValidationError?.message || emailValidationError}`);
+        // Fallback to basic email validation
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        emailValidation = {
+          isValid: emailRegex.test(normalizedEmail),
+          reason: emailRegex.test(normalizedEmail) ? undefined : 'Invalid email format',
+        };
+      }
+      
+      if (!emailValidation.isValid) {
+        this.logger.warn(`Customer signup with invalid email: ${normalizedEmail} - ${emailValidation.reason}`);
+        throw new BadRequestException(emailValidation.reason || 'Invalid email address');
+      }
 
     // For customer signups, we need a valid tenant context
-    // Try to find by ID first, then by subdomain, then create if needed
-    let tenant = await this.prisma.tenant.findUnique({
-      where: { id: tenantId },
-      select: {
-        id: true,
-        subdomain: true,
-        name: true,
-        storeType: true,
-        customerRegistrationRequestEnabled: true,
-        isPrivateStore: true,
-      },
-    });
+    // 1. Clean up the tenantId to ensure it's a valid string
+    const cleanTenantLookupId = String(tenantId || '').trim();
+    this.logger.log(`🔍 [CustomerSignup] Looking up tenant with: "${cleanTenantLookupId}" (original: "${tenantId}")`);
     
-    // If not found by ID, try subdomain
-    if (!tenant) {
-      tenant = await this.prisma.tenant.findUnique({
-        where: { subdomain: tenantId },
+    if (!cleanTenantLookupId || cleanTenantLookupId === 'undefined' || cleanTenantLookupId === 'null') {
+      this.logger.error(`❌ [CustomerSignup] Invalid tenant ID provided: "${tenantId}"`);
+      throw new BadRequestException('Invalid store identification. Please use the correct store URL.');
+    }
+
+    let tenant;
+    try {
+      // Use findFirst with OR to find by ID or subdomain in a single query
+      // This is more efficient and handles both cases (localhost subdomain vs production UUID)
+      tenant = await this.prisma.tenant.findFirst({
+        where: {
+          OR: [
+            { id: cleanTenantLookupId },
+            { subdomain: cleanTenantLookupId },
+          ],
+        },
         select: {
           id: true,
           subdomain: true,
           name: true,
-          storeType: true,
-          customerRegistrationRequestEnabled: true,
           isPrivateStore: true,
         },
       });
+      
+      if (tenant) {
+        this.logger.log(`✅ [CustomerSignup] Found tenant: ${tenant.name} (${tenant.id}, subdomain: ${tenant.subdomain})`);
+      }
+    } catch (dbError: any) {
+      this.logger.error(`❌ [CustomerSignup] Database error finding tenant:`, {
+        error: dbError?.message || String(dbError),
+        code: dbError?.code,
+        stack: dbError?.stack,
+        lookupId: cleanTenantLookupId
+      });
+      // Return a helpful error message to help debugging
+      const devErrorMsg = process.env.NODE_ENV === 'development' ? `. Error: ${dbError?.message}` : '';
+      throw new InternalServerErrorException(`Database error while looking up store${devErrorMsg}. Please try again.`);
     }
     
-    // If still not found, create the tenant
+    // If still not found, create the tenant (for localhost development)
     if (!tenant) {
-      this.logger.log(`Tenant '${tenantId}' not found, creating for customer signup...`);
+      this.logger.log(`🔍 [CustomerSignup] Tenant '${tenantId}' not found, creating for customer signup...`);
       try {
         const platformName = process.env.PLATFORM_NAME || 'Koun';
+        // Use tenantId as subdomain (e.g., "kouncard" from "kouncard.localhost:8080")
+        // Let Prisma generate a UUID for the tenant ID - don't use subdomain as ID
         tenant = await this.prisma.tenant.create({
           data: {
-            id: tenantId === 'default' ? undefined : tenantId,
+            // Don't set id - let Prisma generate a UUID automatically
             name: tenantId === 'default' ? platformName : `Store-${tenantId}`,
-            subdomain: tenantId,
+            subdomain: tenantId, // Use the extracted subdomain (e.g., "kouncard")
             plan: 'STARTER',
             status: 'ACTIVE',
           },
         });
-        this.logger.log(`âœ… Tenant '${tenantId}' created successfully for customer signup`);
+        this.logger.log(`✅ [CustomerSignup] Tenant '${tenantId}' created successfully: ${tenant.id} (subdomain: ${tenant.subdomain})`);
       } catch (error: any) {
+        this.logger.error(`❌ [CustomerSignup] Failed to create tenant '${tenantId}':`, {
+          error: error?.message || String(error),
+          code: error?.code,
+          stack: error?.stack,
+        });
+        
         // Handle unique constraint violations - tenant might exist with different ID
         if (error?.code === 'P2002') {
-          this.logger.log(`Tenant constraint conflict, finding existing tenant...`);
+          this.logger.log(`🔍 [CustomerSignup] Tenant constraint conflict (subdomain already exists), finding existing tenant by subdomain: "${tenantId}"`);
           // Try to find by subdomain again in case of race condition
-          const subdomain = tenantId === 'default' ? 'default' : `store-${tenantId.substring(0, 8)}`;
-          tenant = await this.prisma.tenant.findUnique({
-            where: { subdomain },
-          });
+          try {
+            tenant = await this.prisma.tenant.findFirst({
+              where: { subdomain: tenantId },
+              select: {
+                id: true,
+                subdomain: true,
+                name: true,
+                isPrivateStore: true,
+              },
+            });
+            if (tenant) {
+              this.logger.log(`✅ [CustomerSignup] Found existing tenant after constraint conflict: ${tenant.id}`);
+            }
+          } catch (findError: any) {
+            this.logger.error(`❌ [CustomerSignup] Failed to find tenant after constraint conflict:`, findError?.message || findError);
+          }
         }
+        
         if (!tenant) {
-          this.logger.error(`Failed to create or find tenant '${tenantId}': ${error?.message}`);
+          this.logger.error(`❌ [CustomerSignup] Cannot proceed: Tenant '${tenantId}' does not exist and could not be created`);
           throw new NotFoundException(`Store not found. Please check the store URL.`);
         }
       }
@@ -157,47 +218,6 @@ export class CustomersService {
 
     // Use the actual tenant ID from the found/created tenant
     const actualTenantId = tenant.id;
-
-    // CHECK B2B STORE WITH REGISTRATION REQUESTS ENABLED
-    if ((tenant as any).storeType === 'B2B' && (tenant as any).customerRegistrationRequestEnabled) {
-      this.logger.log(`ًں”„ B2B store with registration requests enabled - creating request instead of direct signup`);
-      
-      try {
-        // Call core API to create registration request
-        const coreApiUrl = process.env.CORE_API_URL || 'http://localhost:3002';
-        const requestData = {
-          tenantId: actualTenantId,
-          email: normalizedEmail,
-          password: signupDto.password,
-          fullName: `${signupDto.firstName || ''} ${signupDto.lastName || ''}`.trim() || normalizedEmail.split('@')[0],
-          phone: signupDto.phone,
-          // Additional B2B fields will be passed from frontend
-          storeName: (signupDto as any).storeName,
-          activity: (signupDto as any).activity,
-          companyName: (signupDto as any).companyName,
-          city: (signupDto as any).city,
-          country: (signupDto as any).country,
-        };
-
-        const response = await firstValueFrom(
-          this.httpService.post(`${coreApiUrl}/api/customer-registration-requests`, requestData)
-        );
-
-        this.logger.log(`âœ… Registration request created: ${response.data.id}`);
-        
-        return {
-          success: true,
-          requiresApproval: true,
-          message: response.data.message || 'Your registration request has been submitted. You will receive an email once it is reviewed.',
-          requestId: response.data.id,
-        };
-      } catch (error: any) {
-        this.logger.error(`â‌Œ Failed to create registration request: ${error.message}`, error.response?.data);
-        throw new BadRequestException(
-          error.response?.data?.message || 'Failed to submit registration request. Please try again later.'
-        );
-      }
-    }
 
     // Check if customer already exists - first check in this tenant, then across all tenants
     const existingCustomerInTenant = await this.prisma.customer.findUnique({
@@ -365,9 +385,31 @@ export class CustomersService {
     }
     
     this.logger.log(`âœ… Customer signup completed for: ${normalizedEmail} - NO CUSTOMER CREATED (waiting for OTP verification)`);
-    this.logger.log(`ًں“‹ OTP Code: ${verificationCode} (customer must verify before account creation)`);
+    this.logger.log(`ًں"‹ OTP Code: ${verificationCode} (customer must verify before account creation)`);
     
     return response;
+    } catch (error: any) {
+      this.logger.error(`❌ Customer signup error in service:`, {
+        error: error?.message || String(error),
+        stack: error?.stack,
+        tenantId,
+        email: signupDto?.email,
+        ipAddress,
+      });
+      
+      // Re-throw known exceptions
+      if (error instanceof BadRequestException || 
+          error instanceof ConflictException || 
+          error instanceof ForbiddenException ||
+          error instanceof NotFoundException) {
+        throw error;
+      }
+      
+      // For unknown errors, throw a more helpful error
+      throw new InternalServerErrorException(
+        error?.message || 'Failed to complete signup. Please try again later.'
+      );
+    }
   }
 
   /**
@@ -527,7 +569,7 @@ export class CustomersService {
     }
 
     // Fetch tenant subdomain for redirection
-    const tenant = await this.prisma.tenant.findUnique({
+    const tenant = await this.prisma.tenant.findFirst({
       where: { id: customer.tenantId },
       select: { subdomain: true, id: true, name: true }
     });
@@ -993,7 +1035,7 @@ export class CustomersService {
     }
 
     // Check for Private Store and get tenant subdomain
-    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    const tenant = await this.prisma.tenant.findFirst({ where: { id: tenantId } });
     const isPrivateStore = (tenant as any)?.isPrivateStore || false;
     
     // Priority: 1. Request subdomain (from headers/hostname), 2. Tenant subdomain from DB
@@ -1359,7 +1401,7 @@ export class CustomersService {
 
 
     // Fetch tenant subdomain for redirection
-    const tenant = await this.prisma.tenant.findUnique({
+    const tenant = await this.prisma.tenant.findFirst({
         where: { id: isEmployee ? employeeData.customer.tenantId : customer.tenantId },
         select: { subdomain: true }
     });

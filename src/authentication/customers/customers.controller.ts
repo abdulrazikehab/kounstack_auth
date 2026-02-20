@@ -18,6 +18,9 @@ import {
   ConflictException,
   UnauthorizedException,
   Logger,
+  InternalServerErrorException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../guard/jwt-auth.guard';
 import { CustomersService, CreateCustomerDto, UpdateCustomerDto } from './customers.service';
@@ -52,85 +55,147 @@ export class CustomersController {
     },
     @Req() req: any,
   ) {
-    // 1. Resolve tenant - PRIORITIZE HOST for strict isolation
-  // Check Host header first to ensure we use the context of the domain being visited
-  let tenantId: string | undefined;
-  const host = req.headers.host || '';
-  
-  if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
-    const parts = host.split('.');
-    if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
-      tenantId = parts[0];
-      this.logger.log(`🔍 Resolved tenantId=\"${tenantId}\" from Host header: ${host}`);
-    }
-  }
-
-  // 2. Fallback to headers (X-Tenant-Id or X-Tenant-Domain)
-  if (!tenantId || tenantId === 'default' || tenantId === 'www') {
-    const headerTenant = (req.headers['x-tenant-id'] || req.headers['x-tenant-domain'] || req.headers['x-subdomain'] || req.tenantId) as string;
-    if (headerTenant) {
-      // If headerTenant looks like a domain, extract subdomain
-      if (headerTenant.includes('.')) {
-        tenantId = headerTenant.split('.')[0];
-      } else {
-        tenantId = headerTenant;
+    try {
+      // 1. Resolve tenant - PRIORITIZE HOST for strict isolation
+      // Check Host header first to ensure we use the context of the domain being visited
+      let tenantId: string | undefined;
+      const host = req.headers.host || '';
+      
+      if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+        const parts = host.split('.');
+        if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
+          tenantId = parts[0];
+          this.logger.log(`🔍 Resolved tenantId=\"${tenantId}\" from Host header: ${host}`);
+        }
       }
-    }
-  }
-    
-    if (tenantId && tenantId !== 'default') {
-      try {
-        let subdomain = tenantId;
-        if (tenantId.includes('.')) {
-          const parts = tenantId.split('.');
-          if (tenantId.includes('localhost')) {
-            subdomain = parts[0] || 'default';
+
+      // 2. Fallback to headers (X-Tenant-Id or X-Tenant-Domain)
+      if (!tenantId || tenantId === 'default' || tenantId === 'www') {
+        const rawHeaderTenant = (req.headers['x-tenant-id'] || req.headers['x-tenant-domain'] || req.headers['x-subdomain'] || req.tenantId);
+        if (rawHeaderTenant) {
+          const headerTenant = String(rawHeaderTenant);
+          this.logger.log(`🔍 Processing header tenant: "${headerTenant}"`);
+          
+          // Handle localhost subdomain format (e.g., "kouncard.localhost:8080" or "kouncard.localhost")
+          // This is the most common case for local development
+          if (headerTenant.includes('.localhost')) {
+            // Remove port if present (e.g., "kouncard.localhost:8080" -> "kouncard.localhost")
+            const withoutPort = headerTenant.split(':')[0];
+            // Extract subdomain (e.g., "kouncard.localhost" -> "kouncard")
+            const localhostParts = withoutPort.split('.localhost');
+            tenantId = localhostParts[0]; // Extract "kouncard" from "kouncard.localhost"
+            this.logger.log(`🔍 Extracted subdomain from localhost domain "${headerTenant}": "${tenantId}"`);
+          }
+          // Handle production domain format (e.g., "kouncard.kounworld.com" or "kouncard.saeaa.com")
+          else if (headerTenant.includes('.')) {
+            const parts = headerTenant.split('.');
+            // Extract subdomain (first part before the first dot)
+            tenantId = parts[0];
+            this.logger.log(`🔍 Extracted subdomain from domain "${headerTenant}": "${tenantId}"`);
           } else {
-            subdomain = parts[0] || tenantId;
+            tenantId = headerTenant;
+            this.logger.log(`🔍 Using header tenant as-is: "${tenantId}"`);
           }
         }
-        
-        const tenant = await this.prisma.tenant.findFirst({
-          where: {
-            OR: [
-              { id: tenantId },
-              { subdomain: subdomain },
-              { id: subdomain },
-            ],
-          },
-        });
-        
-        if (tenant) {
-          tenantId = tenant.id;
-          this.logger.log(`✅ Successfully matched tenant: ${tenant.name} (${tenant.id})`);
-        } else {
-          // STRICT: Reject signup if tenant not found
-          this.logger.error(`❌ Signup rejected: Tenant "${tenantId}" (subdomain: "${subdomain}") does not exist`);
-          throw new BadRequestException(
-            'Store not found. Please make sure you are accessing the correct store URL.'
-          );
-        }
-      } catch (error: any) {
-        if (error instanceof BadRequestException) {
-          throw error; // Re-throw our own exception
-        }
-        this.logger.error(`Error resolving tenant for signup: ${error}`);
-        throw new BadRequestException('Error resolving store. Please try again.');
       }
+        
+      if (tenantId && tenantId !== 'default') {
+        try {
+          // Clean up tenantId - remove any port numbers or localhost suffixes that might have been missed
+          let cleanTenantId = String(tenantId);
+          if (cleanTenantId.includes(':')) {
+            cleanTenantId = cleanTenantId.split(':')[0]; // Remove port
+          }
+          if (cleanTenantId.includes('.localhost')) {
+            cleanTenantId = cleanTenantId.split('.localhost')[0]; // Remove .localhost
+          }
+          
+          let subdomain = cleanTenantId;
+          if (cleanTenantId.includes('.')) {
+            const parts = cleanTenantId.split('.');
+            subdomain = parts[0] || cleanTenantId;
+          }
+          
+          this.logger.log(`🔍 Looking up tenant with cleaned ID: "${cleanTenantId}", subdomain: "${subdomain}"`);
+          
+          const tenant = await this.prisma.tenant.findFirst({
+            where: {
+              OR: [
+                { id: cleanTenantId },
+                { subdomain: subdomain },
+              ],
+            },
+          });
+          
+          if (tenant) {
+            tenantId = tenant.id;
+            this.logger.log(`✅ Successfully matched tenant: ${tenant.name} (${tenant.id}, subdomain: ${tenant.subdomain})`);
+          } else {
+            // STRICT: Reject signup if tenant not found
+            this.logger.error(`❌ Signup rejected: Tenant "${cleanTenantId}" (subdomain: "${subdomain}") does not exist`);
+            throw new BadRequestException(
+              'Store not found. Please make sure you are accessing the correct store URL.'
+            );
+          }
+        } catch (error: any) {
+          if (error instanceof BadRequestException) {
+            throw error; // Re-throw our own exception
+          }
+          this.logger.error(`❌ Error resolving tenant for signup:`, {
+            error: error?.message || String(error),
+            stack: error?.stack,
+            tenantId,
+          });
+          throw new BadRequestException('Error resolving store. Please try again.');
+        }
+      }
+      
+      // STRICT: Reject if no tenant was resolved
+      if (!tenantId || tenantId === 'default' || tenantId === 'null' || tenantId === 'undefined') {
+        this.logger.error(`❌ Signup rejected: No valid tenant context provided (resolved: "${tenantId}")`);
+        throw new BadRequestException(
+          'Unable to determine which store you are trying to access. Please ensure you are on the correct store URL.'
+        );
+      }
+      
+      const ipAddress = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+      this.logger.log(`🔍 Customer Signup Process: tenantId="${tenantId}", email="${signupDto?.email}", IP=${ipAddress}`);
+      
+      this.logger.log(`🚀 Calling customersService.customerSignup with tenantId: "${tenantId}"`);
+      const result = await this.customersService.customerSignup(tenantId, signupDto, ipAddress);
+      this.logger.log(`✅ Customer signup service call completed successfully`);
+      return result;
+    } catch (error: any) {
+      this.logger.error(`❌ Customer signup error in controller (top-level catch):`, {
+        error: error?.message || String(error),
+        errorName: error?.name,
+        errorCode: error?.code,
+        stack: error?.stack,
+        email: signupDto?.email,
+      });
+      
+      // Re-throw known exceptions
+      if (error instanceof BadRequestException || 
+          error instanceof ConflictException || 
+          error instanceof ForbiddenException ||
+          error instanceof NotFoundException) {
+        this.logger.log(`🔄 Re-throwing known exception: ${error.constructor.name}`);
+        throw error;
+      }
+      
+      // Prisma constraint/schema errors -> return 400 so user sees a clear message instead of 500
+      const prismaCode = error?.code;
+      if (typeof prismaCode === 'string' && (prismaCode.startsWith('P2') || prismaCode === 'P1001' || prismaCode === 'P1002')) {
+        const msg = error?.meta?.target || error?.message || 'Invalid data. Please check your input and try again.';
+        this.logger.warn(`Prisma error during signup (converted to 400): ${prismaCode}`, { message: error?.message });
+        throw new BadRequestException(typeof msg === 'string' ? msg : 'Invalid data. Please check your input and try again.');
+      }
+      
+      // For unknown errors, throw a more helpful error with the actual message
+      const errorMessage = error?.message || 'Failed to complete signup. Please try again later.';
+      this.logger.error(`❌ Throwing InternalServerErrorException with message: "${errorMessage}"`);
+      throw new InternalServerErrorException(errorMessage);
     }
-    
-    // STRICT: Reject if no tenant was resolved
-    if (!tenantId || tenantId === 'default') {
-      this.logger.error(`❌ Signup rejected: No tenant context provided`);
-      throw new BadRequestException(
-        'Unable to determine which store you are trying to access. Please ensure you are on the correct store URL.'
-      );
-    }
-    
-    const ipAddress = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
-    this.logger.log(`🔍 Customer Signup Process: tenantId="${tenantId}", IP=${ipAddress}`);
-    
-    return this.customersService.customerSignup(tenantId, signupDto, ipAddress);
   }
 
   /**
