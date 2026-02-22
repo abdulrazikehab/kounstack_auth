@@ -350,6 +350,34 @@ export class AuthController {
     }
   }
 
+  @Post('profile/request-update')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async requestProfileUpdate(
+    @Request() req: any,
+    @Body() updateData: { name?: string; avatar?: string; email?: string; username?: string; phone?: string; password?: string }
+  ) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.requestProfileUpdate(userId, updateData);
+  }
+
+  @Post('profile/confirm-update')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async confirmProfileUpdate(
+    @Request() req: any,
+    @Body() body: { code: string }
+  ) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.confirmProfileUpdate(userId, body.code);
+  }
+
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   async forgotPassword(@Req() req: any, @Body() forgotPasswordDto: any) {

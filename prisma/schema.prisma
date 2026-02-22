@@ -3,45 +3,45 @@ generator client {
 }
 
 datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL")
+  provider          = "mysql"
+  url               = env("DATABASE_URL")
   shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
 model User {
-  id                 String                @id @default(cuid())
-  email              String                @unique
-  username           String?               @unique
-  password           String
-  name               String?
-  role               UserRole              @default(SHOP_OWNER)
-  createdAt          DateTime              @default(now())
-  updatedAt          DateTime              @updatedAt
-  tenantId           String?
-  marketLimit        Int                   @default(2)
-  avatar             String?
-  emailVerified      Boolean               @default(false)
-  oauthProvider      OAuthProvider?
-  oauthProviderId    String?
-  setupCompleted     Boolean               @default(false)
-  recoveryId         String?               @unique
-  nationalId         String?
-  mustChangePassword Boolean               @default(false)
-  phone              String?               @unique
-  twoFactorSecret    String?
-  twoFactorEnabled   Boolean               @default(false)
-  twoFactorRecoveryCodes String?           @db.Text
-  auditLogs          AuditLog[]
-  loginAttempts      LoginAttempt[]
-  passwordResets     PasswordReset[]
-  rateLimits         RateLimit[]
-  refreshTokens      RefreshToken[]
-  securityEvents     SecurityEvent[]
-  sessions           Session[]
-  staffPermissions   StaffPermission[]
-  cloudinaryAccess   UserCloudinaryAccess?
-  userTenants        UserTenant[]
-  tenant             Tenant?               @relation("UserActiveTenant", fields: [tenantId], references: [id])
+  id                     String                @id @default(cuid())
+  email                  String                @unique
+  username               String?               @unique
+  password               String
+  name                   String?
+  role                   UserRole              @default(SHOP_OWNER)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  tenantId               String?
+  marketLimit            Int                   @default(2)
+  avatar                 String?
+  emailVerified          Boolean               @default(false)
+  oauthProvider          OAuthProvider?
+  oauthProviderId        String?
+  setupCompleted         Boolean               @default(false)
+  recoveryId             String?               @unique
+  nationalId             String?
+  mustChangePassword     Boolean               @default(false)
+  phone                  String?               @unique
+  twoFactorSecret        String?
+  twoFactorEnabled       Boolean               @default(false)
+  twoFactorRecoveryCodes String?               @db.Text
+  auditLogs              AuditLog[]
+  loginAttempts          LoginAttempt[]
+  passwordResets         PasswordReset[]
+  rateLimits             RateLimit[]
+  refreshTokens          RefreshToken[]
+  securityEvents         SecurityEvent[]
+  sessions               Session[]
+  staffPermissions       StaffPermission[]
+  cloudinaryAccess       UserCloudinaryAccess?
+  userTenants            UserTenant[]
+  tenant                 Tenant?               @relation("UserActiveTenant", fields: [tenantId], references: [id])
 
   @@index([tenantId], map: "users_tenantId_fkey")
   @@index([username])
@@ -71,12 +71,12 @@ model Tenant {
 }
 
 model RefreshToken {
-  id         String   @id @default(cuid())
-  token      String   @unique @db.VarChar(512)
+  id         String    @id @default(cuid())
+  token      String    @unique @db.VarChar(512)
   userId     String?
   customerId String?
   expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
   user       User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
@@ -240,25 +240,25 @@ model MerchantLimits {
 }
 
 model Customer {
-  id              String             @id @default(cuid())
-  tenantId        String
-  email           String
-  phone           String?
-  firstName       String?
-  lastName        String?
-  password        String?
-  recoveryId      String?            @unique
-  metadata        String?            @db.LongText
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  inviteExpiresAt DateTime?
-  inviteToken     String?            @unique
-  twoFactorSecret String?
-  twoFactorEnabled Boolean           @default(false)
-  twoFactorRecoveryCodes String?     @db.Text
-  employees       CustomerEmployee[]
-  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  refreshTokens   RefreshToken[]
+  id                     String             @id @default(cuid())
+  tenantId               String
+  email                  String
+  phone                  String?
+  firstName              String?
+  lastName               String?
+  password               String?
+  recoveryId             String?            @unique
+  metadata               String?            @db.LongText
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  inviteExpiresAt        DateTime?
+  inviteToken            String?            @unique
+  twoFactorSecret        String?
+  twoFactorEnabled       Boolean            @default(false)
+  twoFactorRecoveryCodes String?            @db.Text
+  employees              CustomerEmployee[]
+  tenant                 Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  refreshTokens          RefreshToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId, createdAt])

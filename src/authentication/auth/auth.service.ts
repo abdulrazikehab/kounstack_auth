@@ -3591,4 +3591,83 @@ async completeOAuthSetup(
       ...tokens,
     };
   }
+
+  async requestProfileUpdate(userId: string, updateData: any) {
+    const user = await this.prismaService.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    
+    // Check if new email already exists
+    if (updateData.email && updateData.email !== user.email) {
+      const existingEmail = await this.prismaService.user.findUnique({ where: { email: updateData.email } });
+      if (existingEmail) throw new ConflictException('Email already in use');
+    }
+
+    // Check if new username already exists
+    if (updateData.username && updateData.username !== user.username) {
+      const existingUsername = await this.prismaService.user.findUnique({ where: { username: updateData.username } });
+      if (existingUsername) throw new ConflictException('Username already in use');
+    }
+
+    if (updateData.password && updateData.password.trim() !== '') {
+      updateData.password = await bcrypt.hash(updateData.password, 12);
+    } else {
+      delete updateData.password;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestException('No data to update');
+    }
+
+    // Generate OTT code for profile update
+    const verificationCode = this.generateResetCode();
+    const updateCode = `PROFILE_${verificationCode}`;
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+
+    await this.prismaService.passwordReset.create({
+      data: {
+        email: user.email,
+        code: updateCode,
+        expiresAt,
+        signupData: JSON.stringify(updateData), // Reuse signupData field for storing the pending updates
+      },
+    });
+
+    // Send email with OTP
+    await this.emailService.sendVerificationEmail(user.email, verificationCode);
+
+    return { message: 'Verification code sent to email', requiresOtp: true };
+  }
+
+  async confirmProfileUpdate(userId: string, code: string) {
+    const user = await this.prismaService.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const updateCode = `PROFILE_${code}`;
+    const resetRecord = await this.prismaService.passwordReset.findFirst({
+      where: {
+        email: user.email,
+        code: updateCode,
+        used: false,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (!resetRecord) {
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    const updateData = JSON.parse(resetRecord.signupData || '{}');
+
+    await this.prismaService.user.update({
+      where: { id: userId },
+      data: updateData,
+    });
+
+    await this.prismaService.passwordReset.update({
+      where: { id: resetRecord.id },
+      data: { used: true },
+    });
+
+    return { message: 'Profile updated successfully' };
+  }
 }
