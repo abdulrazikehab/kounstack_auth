@@ -48,7 +48,7 @@ export class AuthController {
    * Supports cross-subdomain cookies in production
    */
   // apps/app-auth/src/authentication/auth/auth.controller.ts
-  private getCookieOptions() {
+  private getCookieOptions(rememberMe: boolean = false) {
     const isProduction = process.env.NODE_ENV === 'production';
     const rawDomain = isProduction ? (process.env.COOKIE_DOMAIN || undefined) : undefined;
 
@@ -63,22 +63,18 @@ export class AuthController {
 
       // Node's cookie lib requires a bare host name with at least one dot and no protocol/port
       if (hasProtocol || hasSlash || hasSpace || hasPort || !hasDot) {
-        const platformDomain = process.env.PLATFORM_DOMAIN || 'kounworld.com';
-        const secondaryDomain = process.env.PLATFORM_SECONDARY_DOMAIN || 'saeaa.net';
-        this.logger.warn(
-          `Invalid COOKIE_DOMAIN value "${cookieDomain}" — skipping domain on auth cookies. ` +
-          `Expected something like "${platformDomain}" or ".${secondaryDomain}" (no protocol, no port).`,
-        );
         cookieDomain = undefined;
       }
     }
+
+    const maxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
 
     return {
       httpOnly: true,
       secure: isProduction,
       // Browsers require SameSite=None + Secure for cross-site cookies; in nonâ€‘prod fall back to lax
       sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge,
       path: '/',
       ...(cookieDomain && { domain: cookieDomain }),
     };
@@ -197,7 +193,7 @@ export class AuthController {
       await this.rateLimitingService.recordLoginAttempt(ipAddress, identifier, true);
       
       // Set cookies for tokens
-      const cookieOptions = this.getCookieOptions();
+      const cookieOptions = this.getCookieOptions(loginDto.rememberMe);
       res.cookie('accessToken', result.accessToken, cookieOptions);
       res.cookie('refreshToken', result.refreshToken, cookieOptions);
       

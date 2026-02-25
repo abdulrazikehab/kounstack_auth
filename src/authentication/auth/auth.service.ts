@@ -1150,7 +1150,7 @@ export class AuthService {
     }
 
     // Generate tokens
-    const tokens = await this.generateTokens(user);
+    const tokens = await this.generateTokens(user, false, loginDto.rememberMe);
 
     // Get permissions for STAFF users
     let permissions: string[] | undefined = undefined;
@@ -2133,7 +2133,7 @@ export class AuthService {
     return result;
   }
 
-  async generateTokens(user: any, isCustomer: boolean = false) {
+  async generateTokens(user: any, isCustomer: boolean = false, rememberMe: boolean = false) {
     // Ensure we have the latest tenantId from the database
     // This handles cases where tenantId was updated after user object was loaded
     let tenantId = user.tenantId;
@@ -2187,7 +2187,7 @@ export class AuthService {
     
     const refreshToken = this.jwtService.sign(refreshTokenPayload, {
       secret: refreshSecret,
-      expiresIn: '7d',
+      expiresIn: rememberMe ? '30d' : '7d',
     });
 
     // Store refresh token in database

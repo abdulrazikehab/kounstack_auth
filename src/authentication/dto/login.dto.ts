@@ -1,5 +1,5 @@
 // apps/app-auth/src/auth/dto/login.dto.ts
-import { IsEmail, IsString, IsNotEmpty, IsOptional, ValidateIf } from 'class-validator';
+import { IsEmail, IsString, IsNotEmpty, IsOptional, ValidateIf, IsBoolean } from 'class-validator';
 
 export class LoginDto {
   @ValidateIf((obj) => !obj.username) // Required if username is not provided
@@ -22,6 +22,10 @@ export class LoginDto {
   @IsString()
   @IsOptional()
   subdomain?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  rememberMe?: boolean;
 }
 
 export class LoginResponseDto {
