@@ -98,26 +98,27 @@ private buildTenantFrontendUrl(subdomain: string): string {
   const hostname = url.hostname;
   const protocol = url.protocol;
   const port = url.port || (protocol === 'https:' ? '443' : '80');
+  const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
 
   // Handle localhost (development)
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
     return `${protocol}//${subdomain}.localhost${portPart}`;
   }
 
-  // Handle production domains (kawn.com, kawn.net)
-  if (hostname.includes('kawn.com')) {
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-    return `${protocol}//${subdomain}.kawn.com${portPart}`;
+  // Handle production domains
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'kounworld.com';
+  if (hostname.includes(platformDomain)) {
+    return `${protocol}//${subdomain}.${platformDomain}${portPart}`;
   }
 
-  if (hostname.includes('kawn.net')) {
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-    return `${protocol}//${subdomain}.kawn.net${portPart}`;
+  // Handle secondary domains
+  const secondaryDomain = process.env.PLATFORM_SECONDARY_DOMAIN || 'saeaa.net';
+  if (hostname.includes(secondaryDomain) || hostname.includes('saeaa.com')) {
+    const domain = hostname.includes(secondaryDomain) ? secondaryDomain : 'saeaa.com';
+    return `${protocol}//${subdomain}.${domain}${portPart}`;
   }
 
   // Fallback: use subdomain pattern with original hostname
-  const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
   return `${protocol}//${subdomain}.${hostname}${portPart}`;
 }
 
@@ -138,39 +139,27 @@ private getMainDomainFrontendUrl(): string {
   const hostname = url.hostname;
   const protocol = url.protocol;
   const port = url.port || (protocol === 'https:' ? '443' : '80');
+  const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
   
   // For localhost, return as-is
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
     return `${protocol}//localhost${portPart}`;
   }
 
-  // For production, always use main domain (kawn.com or kawn.net)
-  // Remove any subdomain prefix (e.g., kawn.kawn.com -> kawn.com)
-  if (hostname.includes('kawn.com')) {
-    // Extract main domain (kawn.com)
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-    return `${protocol}//kawn.com${portPart}`;
+  // For production, prioritize PLATFORM_DOMAIN
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'kounworld.com';
+  if (hostname.includes(platformDomain)) {
+    return `${protocol}//${platformDomain}${portPart}`;
   }
 
-  if (hostname.includes('kawn.net')) {
-    // Extract main domain (kawn.net)
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-    return `${protocol}//kawn.net${portPart}`;
+  const secondaryDomain = process.env.PLATFORM_SECONDARY_DOMAIN || 'saeaa.net';
+  if (hostname.includes(secondaryDomain)) {
+    return `${protocol}//${secondaryDomain}${portPart}`;
   }
 
-  // For other domains, remove subdomain if present
-  const parts = hostname.split('.');
-  if (parts.length > 2) {
-    // Has subdomain, use main domain (last two parts)
-    const mainDomain = parts.slice(-2).join('.');
-    const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-    return `${protocol}//${mainDomain}${portPart}`;
-  }
-
-  // Already main domain, return as-is
-  const portPart = port && port !== '80' && port !== '443' ? `:${port}` : '';
-  return `${protocol}//${hostname}${portPart}`;
+  // For other domains (like custom domains), we still want to go back to the platform domain
+  // if this is an OAuth callback for a merchant login.
+  return `${protocol}//${platformDomain}${portPart}`;
 }
 
   // POST /auth/oauth/mock-google-auth

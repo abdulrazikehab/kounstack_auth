@@ -866,14 +866,30 @@ export class AuthService {
     // Extract subdomain from tenantDomain if not provided directly
     let resolvedSubdomain = subdomain;
     if (!resolvedSubdomain && tenantDomain) {
+      // Clean up tenantDomain (remove port)
+      const cleanTenantDomain = tenantDomain.split(':')[0].toLowerCase();
+      
       // Extract subdomain from domain (e.g., "market.kawn.com" -> "market")
-      if (tenantDomain.includes('.localhost')) {
-        resolvedSubdomain = tenantDomain.split('.localhost')[0];
-      } else if (tenantDomain.endsWith('.kounworld.com') || tenantDomain.endsWith('.saeaa.net')) {
-        const parts = tenantDomain.split('.');
-        if (parts.length >= 3 && parts[0] !== 'www' && parts[0] !== 'app') {
-          resolvedSubdomain = parts[0];
+      if (cleanTenantDomain.includes('.localhost')) {
+        resolvedSubdomain = cleanTenantDomain.split('.localhost')[0];
+      } else if (
+        cleanTenantDomain.endsWith('.kounworld.com') || 
+        cleanTenantDomain.endsWith('.saeaa.net') ||
+        cleanTenantDomain.endsWith('.saeaa.com')
+      ) {
+        const parts = cleanTenantDomain.split('.');
+        if (parts.length >= 3) {
+          const firstPart = parts[0];
+          if (firstPart !== 'www' && firstPart !== 'app' && firstPart !== 'admin' && firstPart !== 'api') {
+            resolvedSubdomain = firstPart;
+          }
         }
+      } else if (cleanTenantDomain.includes('.') && 
+                 !cleanTenantDomain.includes('localhost') && 
+                 !cleanTenantDomain.includes('app-auth') && 
+                 !cleanTenantDomain.includes('saeaa')) {
+        // Potential custom domain - we treat it as an ID/Subdomain for lookup
+        resolvedSubdomain = cleanTenantDomain;
       }
     }
 
@@ -1476,17 +1492,29 @@ export class AuthService {
     if (!user) {
       const customerWhere: any = { email };
       if (tenantId) {
-        // Resolve tenantId if it's a subdomain
+        // Resolve tenantId if it's a subdomain or domain
         let resolvedTenantId = tenantId;
+        const cleanId = tenantId.split(':')[0].split('.localhost')[0].toLowerCase();
+        let subdomain = cleanId;
+        if (cleanId.includes('.')) {
+          subdomain = cleanId.split('.')[0];
+        }
+        
         const tenant = await this.prismaService.tenant.findFirst({
           where: {
             OR: [
               { id: tenantId },
-              { subdomain: tenantId }
+              { id: cleanId },
+              { subdomain: subdomain },
+              { subdomain: cleanId }
             ]
           }
         });
-        if (tenant) resolvedTenantId = tenant.id;
+        if (tenant) {
+          resolvedTenantId = tenant.id;
+        } else {
+          this.logger.warn(`⚠️ Could not resolve tenant for forgot-password: ${tenantId}`);
+        }
         customerWhere.tenantId = resolvedTenantId;
       }
 

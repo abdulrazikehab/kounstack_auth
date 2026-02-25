@@ -75,12 +75,9 @@ async function bootstrap() {
     // This ensures preflight requests get proper CORS headers
     app.use((req: Request, res: Response, next: NextFunction) => {
       if (req.method === 'OPTIONS') {
-        // Set CORS headers for preflight
         const origin = req.headers.origin;
-        // SECURITY FIX: Never use wildcard (*) for credentialed requests.
-        // Only echo back a specific, validated origin.
         if (origin) {
-          // Validate origin
+          // SECURITY FIX: Never use wildcard (*) for credentialed requests.
           if (
             allowedOriginsList.includes(origin) ||
             /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net|kounworld\.com)$/.test(origin) ||
@@ -112,34 +109,23 @@ async function bootstrap() {
           'x-apikey'
         ].join(', '));
         res.setHeader('Access-Control-Allow-Credentials', 'true');
-        res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
-        return res.status(204).end(); // Respond to preflight immediately
+        res.setHeader('Access-Control-Max-Age', '86400');
+        return res.status(204).end();
       }
       next();
     });
 
     app.use(cors({
       origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) => {
-        // Allow requests with no origin (mobile apps, Postman, curl)
-        if (!origin) {
-          return callback(null, true);
-        }
+        if (!origin) return callback(null, true);
+        if (allowedOriginsList.includes(origin)) return callback(null, origin);
 
-        // Check exact match
-        if (allowedOriginsList.includes(origin)) {
-          return callback(null, origin);
-        }
-
-        // Allow subdomains of kawn.com and kawn.net and kounworld.com and saeaa.net
+        // Allow subdomains of all platform domains
         const isAllowedSubdomain = /^https:\/\/([\w-]+\.)?(saeaa\.com|saeaa\.net|kawn\.com|kawn\.net|kounworld\.com)$/.test(origin);
-        if (isAllowedSubdomain) {
-          return callback(null, origin);
-        }
+        if (isAllowedSubdomain) return callback(null, origin);
 
         // Allow localhost subdomains (development)
-        if (/^http:\/\/[\w-]+\.localhost(:\d+)?$/.test(origin)) {
-          return callback(null, origin);
-        }
+        if (/^http:\/\/[\w-]+\.localhost(:\d+)?$/.test(origin)) return callback(null, origin);
 
         // Allow nip.io domains (development)
         if (origin.includes('.nip.io')) {

@@ -404,14 +404,39 @@ export class AuthController {
       || req.headers['x-subdomain']
       || req.tenantId;
 
-    // Fallback to Host header
-    if (!tenantId || tenantId === 'default') {
+    // Fallback to Host header if no explicit tenant header
+    if (!tenantId || tenantId === 'default' || tenantId === 'www') {
       const host = req.headers.host || '';
-      if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
-        const subdomain = host.split('.')[0];
-        if (subdomain && subdomain !== 'localhost' && subdomain !== 'app' && subdomain !== 'www') {
-          tenantId = subdomain;
+      if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
+        const parts = host.split('.');
+        if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
+          tenantId = parts[0];
+          this.logger.log(`🔍 Resolved tenantId="${tenantId}" from Host header for forgot-password: ${host}`);
         }
+      }
+    }
+
+    if (tenantId && tenantId !== 'default' && tenantId !== 'null' && tenantId !== 'undefined') {
+      try {
+        // Clean up tenantId - handle potential domain suffix
+        let cleanTenantId = String(tenantId);
+        if (cleanTenantId.includes(':')) {
+          cleanTenantId = cleanTenantId.split(':')[0]; // Remove port
+        }
+        if (cleanTenantId.includes('.localhost')) {
+          cleanTenantId = cleanTenantId.split('.localhost')[0];
+        }
+        
+        let subdomain = cleanTenantId;
+        if (cleanTenantId.includes('.')) {
+          const parts = cleanTenantId.split('.');
+          subdomain = parts[0] || cleanTenantId;
+        }
+        
+        // Pass the cleaned subdomain to the service
+        tenantId = subdomain;
+      } catch (error: any) {
+        this.logger.error(`Error cleaning tenantId for forgot-password: ${error.message}`);
       }
     }
 

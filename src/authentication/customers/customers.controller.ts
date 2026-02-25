@@ -61,7 +61,7 @@ export class CustomersController {
       let tenantId: string | undefined;
       const host = req.headers.host || '';
       
-      if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+      if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
         const parts = host.split('.');
         if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
           tenantId = parts[0];
@@ -212,7 +212,7 @@ export class CustomersController {
     let tenantId: string | undefined;
     const host = req.headers.host || '';
     
-    if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+    if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
       const parts = host.split('.');
       if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
         tenantId = parts[0];
@@ -252,7 +252,7 @@ export class CustomersController {
     let tenantId: string | undefined;
     const host = req.headers.host || '';
     
-    if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+    if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
       const parts = host.split('.');
       if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
         tenantId = parts[0];
@@ -309,9 +309,9 @@ export class CustomersController {
       let tenantId: string | undefined;
       const host = req.headers.host || '';
       
-      if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+      if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
         const subdomain = host.split('.')[0];
-        if (subdomain && subdomain !== 'localhost' && subdomain !== 'app' && subdomain !== 'www' && subdomain !== 'kawn' && subdomain !== 'api' && subdomain !== 'admin' && subdomain !== 'saeaa') {
+        if (subdomain && subdomain !== 'localhost' && subdomain !== 'app' && subdomain !== 'www' && subdomain !== 'kawn' && subdomain !== 'api' && subdomain !== 'admin') {
           tenantId = subdomain;
           this.logger.log(`🔍 Resolved tenantId="${tenantId}" from Host header: ${host}`);
         }
@@ -325,24 +325,31 @@ export class CustomersController {
           || req.tenantId;
       }
 
-      if (tenantId && tenantId !== 'default') {
+      if (tenantId && tenantId !== 'default' && tenantId !== 'null' && tenantId !== 'undefined') {
         try {
-          let subdomain = tenantId;
-          if (tenantId.includes('.')) {
-            const parts = tenantId.split('.');
-            if (tenantId.includes('localhost')) {
-              subdomain = parts[0] || 'default';
-            } else {
-              subdomain = parts[0] || tenantId;
-            }
+          // Clean up tenantId - handle potential domain suffix
+          let cleanTenantId = String(tenantId);
+          if (cleanTenantId.includes(':')) {
+            cleanTenantId = cleanTenantId.split(':')[0]; // Remove port
           }
+          if (cleanTenantId.includes('.localhost')) {
+            cleanTenantId = cleanTenantId.split('.localhost')[0];
+          }
+          
+          let subdomain = cleanTenantId;
+          if (cleanTenantId.includes('.')) {
+            const parts = cleanTenantId.split('.');
+            subdomain = parts[0] || cleanTenantId;
+          }
+          
+          this.logger.log(`🔍 Lookup tenant in login: id="${cleanTenantId}", subdomain="${subdomain}"`);
           
           const tenant = await this.prisma.tenant.findFirst({
             where: {
               OR: [
-                { subdomain },
-                { id: tenantId },
-                { id: subdomain },
+                { id: cleanTenantId },
+                { subdomain: subdomain },
+                { subdomain: cleanTenantId },
               ],
             },
           });
@@ -352,7 +359,7 @@ export class CustomersController {
             this.logger.log(`✅ Matched tenant: ${tenant.name} (${tenant.id})`);
           } else {
             // STRICT: Reject login if tenant not found
-            this.logger.error(`❌ Login rejected: Tenant "${tenantId}" (subdomain: "${subdomain}") does not exist`);
+            this.logger.error(`❌ Login rejected: Tenant "${cleanTenantId}" (subdomain: "${subdomain}") does not exist`);
             throw new BadRequestException(
               'Store not found. Please make sure you are accessing the correct store URL.'
             );
@@ -361,14 +368,14 @@ export class CustomersController {
           if (error instanceof BadRequestException) {
             throw error; // Re-throw our own exception
           }
-          this.logger.error(`Error resolving tenant: ${error.message}`);
+          this.logger.error(`Error resolving tenant for login: ${error.message}`);
           throw new BadRequestException('Error resolving store. Please try again.');
         }
       }
       
       // STRICT: Reject if no tenant was resolved
-      if (!tenantId || tenantId === 'default') {
-        this.logger.error(`❌ Login rejected: No tenant context provided`);
+      if (!tenantId || tenantId === 'default' || tenantId === 'null' || tenantId === 'undefined') {
+        this.logger.error(`❌ Login rejected: No valid tenant context provided`);
         throw new BadRequestException(
           'Unable to determine which store you are trying to access. Please ensure you are on the correct store URL.'
         );
