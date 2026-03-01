@@ -336,7 +336,7 @@ async function bootstrap() {
       (process.env.CORE_PORT && Number(process.env.CORE_PORT)) ||
       3001;
 
-      await app.listen(port,'127.0.0.1');
+    await app.listen(port,'0.0.0.0');
       logger.log(`✅ Auth service running on port ${port}`);
   } catch (error) {
     logger.error('Failed to start auth service:', error);
