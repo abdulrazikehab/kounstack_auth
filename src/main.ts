@@ -36,7 +36,8 @@ async function bootstrap() {
     
     // Set global prefix to match Nginx proxy and frontend expectations
     app.setGlobalPrefix('auth');
-    
+    const expressApp = app.getHttpAdapter().getInstance();
+    expressApp.set('trust proxy', 1);
     // CRITICAL: Enable CORS FIRST before any other middleware to prevent duplicate headers
     // Enable CORS with proper origin handling to prevent duplicate headers
 
