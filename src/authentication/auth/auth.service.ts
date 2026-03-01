@@ -1842,88 +1842,90 @@ export class AuthService {
    */
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<{ message: string }> {
     try {
-      // 1) Try regular platform user first
-      const user = await this.prismaService.user.findUnique({
+      this.logger.log(`🔐 Change password request for ID: ${userId}`);
+
+      // 1. Try to find in User table
+      let identity: any = await this.prismaService.user.findUnique({
         where: { id: userId },
       });
+      let identityType: 'user' | 'customerEmployee' | 'customer' = 'user';
 
-      if (user) {
-        // Verify current password (if mustChangePassword is false, require current password)
-        // If mustChangePassword is true, allow change without current password (first login)
-        if (!user.mustChangePassword) {
-          const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
-          if (!isCurrentPasswordValid) {
-            throw new BadRequestException('Current password is incorrect');
-          }
-        } else {
-          // For first login, verify the temporary password
-          const isTemporaryPasswordValid = await bcrypt.compare(currentPassword, user.password);
-          if (!isTemporaryPasswordValid) {
-            throw new BadRequestException('Temporary password is incorrect');
-          }
-        }
-
-        // SECURITY FIX: Validate password against policy
-        validatePasswordOrThrow(newPassword, undefined, { email: user.email, username: user.username });
-
-        // Hash new password
-        const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-        // Update password and clear mustChangePassword flag
-        await this.prismaService.user.update({
+      // 2. If not found, try CustomerEmployee
+      if (!identity) {
+        identity = await this.prismaService.customerEmployee.findUnique({
           where: { id: userId },
-          data: {
-            password: hashedPassword,
-            mustChangePassword: false, // Clear the flag after password change
-          },
         });
-
-        this.logger.log(`✅ Password changed successfully for user: ${user.email}`);
-        return { message: 'Password changed successfully' };
+        if (identity) identityType = 'customerEmployee';
       }
 
-      // 2) If not a platform user, try CustomerEmployee (B2B store employees)
-      const employee = await this.prismaService.customerEmployee.findUnique({
-        where: { id: userId },
-      });
+      // 3. If still not found, try Customer
+      if (!identity) {
+        identity = await this.prismaService.customer.findUnique({
+          where: { id: userId },
+        });
+        if (identity) identityType = 'customer';
+      }
 
-      if (!employee) {
-        // Neither a User nor a CustomerEmployee – keep previous behaviour
+      if (!identity) {
+        this.logger.error(`❌ Identity not found for password change. ID: ${userId}`);
         throw new NotFoundException('User not found');
       }
 
-      // For employees we apply the same rules:
-      // - If mustChangePassword is false, require the current password
-      // - If mustChangePassword is true, treat currentPassword as the temporary password
-      if (!employee.mustChangePassword) {
-        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, employee.password);
-        if (!isCurrentPasswordValid) {
-          throw new BadRequestException('Current password is incorrect');
-        }
-      } else {
-        const isTemporaryPasswordValid = await bcrypt.compare(currentPassword, employee.password);
-        if (!isTemporaryPasswordValid) {
-          throw new BadRequestException('Temporary password is incorrect');
-        }
+      // Verify current password
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, identity.password);
+      if (!isCurrentPasswordValid) {
+        const errorMsg = identity.mustChangePassword 
+          ? 'Temporary password is incorrect' 
+          : 'Current password is incorrect';
+        throw new BadRequestException(errorMsg);
       }
 
-      // Validate new password using the same policy (we only have email for employees)
-      validatePasswordOrThrow(newPassword, undefined, { email: employee.email });
-
-      const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-      await this.prismaService.customerEmployee.update({
-        where: { id: userId },
-        data: {
-          password: hashedPassword,
-          mustChangePassword: false,
-        },
+      // SECURITY FIX: Validate password against policy
+      validatePasswordOrThrow(newPassword, undefined, { 
+        email: identity.email, 
+        username: identity.username || identity.firstName || identity.name 
       });
 
-      this.logger.log(`✅ Password changed successfully for customer employee: ${employee.email}`);
+      // Hash new password
+      const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+      // Update password and clear mustChangePassword flag in the correct table
+      switch (identityType) {
+        case 'user':
+          await this.prismaService.user.update({
+            where: { id: userId },
+            data: {
+              password: hashedPassword,
+              mustChangePassword: false,
+            },
+          });
+          break;
+        case 'customerEmployee':
+          await this.prismaService.customerEmployee.update({
+            where: { id: userId },
+            data: {
+              password: hashedPassword,
+              mustChangePassword: false,
+            },
+          });
+          break;
+        case 'customer':
+          await this.prismaService.customer.update({
+            where: { id: userId },
+            data: {
+              password: hashedPassword,
+              // Customers might not have mustChangePassword field, so we leave it
+            },
+          });
+          break;
+      }
+
+      this.logger.log(`✅ Password changed successfully for ${identityType}: ${identity.email}`);
       return { message: 'Password changed successfully' };
     } catch (error: any) {
-      this.logger.error(`❌ Password change failed: ${error.message}`);
+      if (!(error instanceof BadRequestException || error instanceof NotFoundException)) {
+        this.logger.error(`❌ Password change failed: ${error.message}`);
+      }
       throw error;
     }
   }
@@ -3621,17 +3623,38 @@ async completeOAuthSetup(
   }
 
   async requestProfileUpdate(userId: string, updateData: any) {
-    const user = await this.prismaService.user.findUnique({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
+    // 1. Try to find in User table
+    let identity: any = await this.prismaService.user.findUnique({ where: { id: userId } });
+    let identityType: 'user' | 'customerEmployee' | 'customer' = 'user';
+
+    // 2. If not found, try CustomerEmployee
+    if (!identity) {
+      identity = await this.prismaService.customerEmployee.findUnique({ where: { id: userId } });
+      if (identity) identityType = 'customerEmployee';
+    }
+
+    // 3. If still not found, try Customer
+    if (!identity) {
+      identity = await this.prismaService.customer.findUnique({ where: { id: userId } });
+      if (identity) identityType = 'customer';
+    }
+
+    if (!identity) throw new NotFoundException('User not found');
     
-    // Check if new email already exists
-    if (updateData.email && updateData.email !== user.email) {
+    // Check if new email already exists (across respective tables if needed, but here we check User table as primary)
+    if (updateData.email && updateData.email !== identity.email) {
       const existingEmail = await this.prismaService.user.findUnique({ where: { email: updateData.email } });
       if (existingEmail) throw new ConflictException('Email already in use');
+      
+      // Also check customer tables if it's a customer-related update
+      if (identityType !== 'user') {
+        const existingCustomerEmail = await this.prismaService.customer.findUnique({ where: { email: updateData.email } });
+        if (existingCustomerEmail) throw new ConflictException('Email already in use');
+      }
     }
 
     // Check if new username already exists
-    if (updateData.username && updateData.username !== user.username) {
+    if (updateData.username && updateData.username !== identity.username) {
       const existingUsername = await this.prismaService.user.findUnique({ where: { username: updateData.username } });
       if (existingUsername) throw new ConflictException('Username already in use');
     }
@@ -3653,7 +3676,7 @@ async completeOAuthSetup(
 
     await this.prismaService.passwordReset.create({
       data: {
-        email: user.email,
+        email: identity.email,
         code: updateCode,
         expiresAt,
         signupData: JSON.stringify(updateData), // Reuse signupData field for storing the pending updates
@@ -3661,41 +3684,70 @@ async completeOAuthSetup(
     });
 
     // Send email with OTP
-    await this.emailService.sendVerificationEmail(user.email, verificationCode);
+    await this.emailService.sendVerificationEmail(identity.email, verificationCode);
 
     return { message: 'Verification code sent to email', requiresOtp: true };
   }
 
   async confirmProfileUpdate(userId: string, code: string) {
-    const user = await this.prismaService.user.findUnique({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
+    // 1. Try to find in User table
+    let identity: any = await this.prismaService.user.findUnique({ where: { id: userId } });
+    let identityType: 'user' | 'customerEmployee' | 'customer' = 'user';
+
+    // 2. If not found, try CustomerEmployee
+    if (!identity) {
+      identity = await this.prismaService.customerEmployee.findUnique({ where: { id: userId } });
+      if (identity) identityType = 'customerEmployee';
+    }
+
+    // 3. If still not found, try Customer
+    if (!identity) {
+      identity = await this.prismaService.customer.findUnique({ where: { id: userId } });
+      if (identity) identityType = 'customer';
+    }
+
+    if (!identity) throw new NotFoundException('User not found');
 
     const updateCode = `PROFILE_${code}`;
     const resetRecord = await this.prismaService.passwordReset.findFirst({
       where: {
-        email: user.email,
+        email: identity.email,
         code: updateCode,
         used: false,
-        expiresAt: { gt: new Date() },
       },
+      orderBy: { createdAt: 'desc' },
     });
 
-    if (!resetRecord) {
+    if (!resetRecord || resetRecord.expiresAt < new Date()) {
       throw new BadRequestException('Invalid or expired verification code');
     }
 
     const updateData = JSON.parse(resetRecord.signupData || '{}');
 
-    await this.prismaService.user.update({
-      where: { id: userId },
-      data: updateData,
-    });
+    // Update the identity
+    if (identityType === 'user') {
+      await this.prismaService.user.update({
+        where: { id: userId },
+        data: updateData,
+      });
+    } else if (identityType === 'customerEmployee') {
+      await this.prismaService.customerEmployee.update({
+        where: { id: userId },
+        data: updateData,
+      });
+    } else if (identityType === 'customer') {
+      await this.prismaService.customer.update({
+        where: { id: userId },
+        data: updateData,
+      });
+    }
 
+    // Mark reset record as used
     await this.prismaService.passwordReset.update({
       where: { id: resetRecord.id },
       data: { used: true },
     });
 
-    return { message: 'Profile updated successfully' };
+    return { success: true, message: 'Profile updated successfully' };
   }
 }

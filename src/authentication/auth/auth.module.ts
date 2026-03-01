@@ -1,5 +1,6 @@
 // src/auth/auth.module.ts
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
+import { CustomerEmployeesModule } from '../../customer-employees/customer-employees.module';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -40,6 +41,7 @@ import { CustomersService } from '../customers/customers.service';
     EmailModule,
     RateLimitingModule,
     HttpModule,
+    forwardRef(() => CustomerEmployeesModule),
   ],
   controllers: [
     AuthController, 

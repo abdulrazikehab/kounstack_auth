@@ -28,6 +28,7 @@ import { RateLimitingService } from '../../rate-limiting/rate-limiting.service';
 import { JwtAuthGuard } from '../guard/jwt-auth.guard';
 import { RolesGuard } from '../guard/roles.guard';
 import { Roles } from '../decorators/roles.decorator';
+import { CustomerEmployeesService } from '../../customer-employees/customer-employees.service';
 import { ChangePasswordDto } from '../dto/password.dto';
 import { SignUpDto } from '../dto/signup.dto';
 import { LoginDto } from '../dto/login.dto';
@@ -41,6 +42,7 @@ export class AuthController {
     private authService: AuthService,
     private emailService: EmailService,
     private rateLimitingService: RateLimitingService,
+    private customerEmployeesService: CustomerEmployeesService,
   ) {}
 
   /**
@@ -322,26 +324,51 @@ export class AuthController {
     }
 
     try {
-      const updatedUser = await this.authService['prismaService'].user.update({
-        where: { id: userId },
-        data: {
-          avatar: updateData.avatar,
-        },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          tenantId: true,
-          avatar: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
+      // 1. Try to find in User table
+      let identity: any = await this.authService['prismaService'].user.findUnique({ where: { id: userId } });
+      let identityType: 'user' | 'customerEmployee' | 'customer' = 'user';
 
-      this.logger.log(`User profile updated: ${userId}`);
-      return updatedUser;
+      // 2. If not found, try CustomerEmployee
+      if (!identity) {
+        identity = await this.authService['prismaService'].customerEmployee.findUnique({ where: { id: userId } });
+        if (identity) identityType = 'customerEmployee';
+      }
+
+      // 3. If still not found, try Customer
+      if (!identity) {
+        identity = await this.authService['prismaService'].customer.findUnique({ where: { id: userId } });
+        if (identity) identityType = 'customer';
+      }
+
+      if (!identity) throw new NotFoundException('User not found');
+
+      let updatedIdentity: any;
+
+      if (identityType === 'user') {
+        updatedIdentity = await this.authService['prismaService'].user.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+          select: { id: true, email: true, role: true, tenantId: true, avatar: true },
+        });
+      } else if (identityType === 'customerEmployee') {
+        updatedIdentity = await this.authService['prismaService'].customerEmployee.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+        });
+        updatedIdentity = { ...updatedIdentity, role: 'CUSTOMER_EMPLOYEE' };
+      } else if (identityType === 'customer') {
+        updatedIdentity = await this.authService['prismaService'].customer.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+        });
+        updatedIdentity = { ...updatedIdentity, role: 'CUSTOMER' };
+      }
+
+      this.logger.log(`${identityType} profile updated: ${userId}`);
+      return updatedIdentity;
     } catch (error) {
-      this.logger.error(`Error updating user profile: ${error}`);
+      this.logger.error(`Error updating profile: ${error}`);
+      if (error instanceof NotFoundException) throw error;
       throw new InternalServerErrorException('Failed to update profile');
     }
   }
@@ -468,6 +495,18 @@ export class AuthController {
     if (!userId) {
       throw new UnauthorizedException('User not authenticated');
     }
+    
+    // CUSTOMER EMPLOYEE ROUTING - Route requests specifically to the CustomerEmployeesService
+    if (req.user?.role === 'CUSTOMER_EMPLOYEE' || req.user?.type === 'customer_employee') {
+      this.logger.log(`🔄 Routing employee password change to CustomerEmployeesService for: ${userId}`);
+      return this.customerEmployeesService.changePassword(
+        userId, 
+        changePasswordDto.currentPassword, 
+        changePasswordDto.newPassword
+      );
+    }
+    
+    // Default to AuthService for regular platform users
     return this.authService.changePassword(userId, changePasswordDto.currentPassword, changePasswordDto.newPassword);
   }
 
