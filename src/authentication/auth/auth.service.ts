@@ -1,4 +1,4 @@
-﻿import { Injectable, UnauthorizedException, ConflictException, BadRequestException, ForbiddenException, Logger, NotFoundException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException, BadRequestException, ForbiddenException, Logger, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -1046,14 +1046,30 @@ export class AuthService {
     this.logger.log(`✅ User found: ${user.email}, emailVerified: ${user.emailVerified}, role: ${user.role}, tenantId: ${user.tenantId}`);
 
     // Validate subdomain if provided (for multi-tenant login)
+    // Allow login from apex/main platform domains (e.g. kounworld.com, www.kounworld.com) so dashboard users can sign in from the main site
+    const apexDomains = [
+      'kounworld.com', 'www.kounworld.com',
+      'saeaa.net', 'www.saeaa.net', 'saeaa.com', 'www.saeaa.com',
+      'kawn.com', 'www.kawn.com', 'kawn.net', 'www.kawn.net',
+    ];
+    const platformDomain = (process.env.PLATFORM_DOMAIN || 'kounworld.com').toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+    if (platformDomain && !apexDomains.includes(platformDomain)) {
+      apexDomains.push(platformDomain, `www.${platformDomain}`);
+    }
+    const isLoginFromApexDomain = !!(resolvedSubdomain && apexDomains.includes(resolvedSubdomain.toLowerCase()));
+
     if (resolvedSubdomain && !isAdmin) {
       if (user.tenant?.subdomain) {
-        // User has a tenant - validate subdomain matches
-        if (user.tenant.subdomain !== resolvedSubdomain) {
+        // User has a tenant - validate subdomain matches, unless logging in from apex (main dashboard domain)
+        if (!isLoginFromApexDomain && user.tenant.subdomain !== resolvedSubdomain) {
           this.logger.warn(`❌ Subdomain mismatch: user tenant is "${user.tenant.subdomain}", login attempted from "${resolvedSubdomain}"`);
           throw new UnauthorizedException(`Subdomain mismatch: Your account belongs to '${user.tenant.subdomain}', but you are logging in from '${resolvedSubdomain}'.`);
         }
-        this.logger.log(`✅ Subdomain validated: ${resolvedSubdomain} matches user's tenant`);
+        if (isLoginFromApexDomain) {
+          this.logger.log(`✅ Login from apex domain ${resolvedSubdomain} - allowing tenant ${user.tenant.subdomain}`);
+        } else {
+          this.logger.log(`✅ Subdomain validated: ${resolvedSubdomain} matches user's tenant`);
+        }
       } else {
         // User doesn't have a tenant yet - this is allowed for initial setup
         this.logger.log(`ℹ️ User has no tenant yet - allowing login for setup (subdomain: ${resolvedSubdomain})`);

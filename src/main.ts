@@ -35,7 +35,8 @@ async function bootstrap() {
     const app = await NestFactory.create(AppModule);
     
     // Set global prefix to match Nginx proxy and frontend expectations
-    app.setGlobalPrefix('auth');
+    // Exclude /health so load balancers can hit GET /health without /auth prefix
+    app.setGlobalPrefix('auth', { exclude: ['health'] });
     const expressApp = app.getHttpAdapter().getInstance();
     expressApp.set('trust proxy', 1);
     // CRITICAL: Enable CORS FIRST before any other middleware to prevent duplicate headers
