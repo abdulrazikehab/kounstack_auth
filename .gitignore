@@ -8,3 +8,12 @@ build/
 .env.*
 
 migrations/.env
+
+node_modules/
+
+# Ignore build or dist folders
+dist/
+build/
+# Ignore environment files (never commit secrets)
+
+.env
