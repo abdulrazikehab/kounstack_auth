@@ -1,0 +1,981 @@
+﻿import { 
+  Controller, 
+  Post, 
+  Body, 
+  HttpCode, 
+  HttpStatus, 
+  Get, 
+  Put,
+  Delete,
+  Query,
+  Param,
+  UseGuards, 
+  Req,
+  Request,
+  Res,
+  ForbiddenException,
+  UnauthorizedException,
+  InternalServerErrorException,
+  NotFoundException,
+  BadRequestException,
+  Logger
+} from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
+import { Response } from 'express';
+import { ThrottlerGuard } from '@nestjs/throttler';
+import { AuthService } from './auth.service';
+import { EmailService } from '../../email/email.service';
+import { RateLimitingService } from '../../rate-limiting/rate-limiting.service';
+import { JwtAuthGuard } from '../guard/jwt-auth.guard';
+import { RolesGuard } from '../guard/roles.guard';
+import { Roles } from '../decorators/roles.decorator';
+import { CustomerEmployeesService } from '../../customer-employees/customer-employees.service';
+import { ChangePasswordDto } from '../dto/password.dto';
+import { SignUpDto } from '../dto/signup.dto';
+import { LoginDto } from '../dto/login.dto';
+
+@UseGuards(ThrottlerGuard)
+@Controller()
+export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
+  constructor(
+    private readonly authService: AuthService,
+    private readonly prisma: PrismaService,
+    private emailService: EmailService,
+    private rateLimitingService: RateLimitingService,
+    private customerEmployeesService: CustomerEmployeesService,
+  ) {}
+
+  /**
+   * Get cookie options for setting authentication tokens
+   * Supports cross-subdomain cookies in production
+   */
+  // apps/app-auth/src/authentication/auth/auth.controller.ts
+  private getCookieOptions(rememberMe: boolean = false) {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const rawDomain = isProduction ? (process.env.COOKIE_DOMAIN || undefined) : undefined;
+
+    // Normalize and validate domain so we don't crash Express with "option domain is invalid"
+    let cookieDomain = rawDomain?.trim();
+    if (cookieDomain) {
+      const hasProtocol = cookieDomain.includes('://');
+      const hasSlash = cookieDomain.includes('/');
+      const hasSpace = /\s/.test(cookieDomain);
+      const hasPort = cookieDomain.includes(':');
+      const hasDot = cookieDomain.includes('.');
+
+      // Node's cookie lib requires a bare host name with at least one dot and no protocol/port
+      if (hasProtocol || hasSlash || hasSpace || hasPort || !hasDot) {
+        cookieDomain = undefined;
+      }
+    }
+
+    const maxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+
+    return {
+      httpOnly: true,
+      secure: isProduction,
+      // Browsers require SameSite=None + Secure for cross-site cookies; in nonâ€‘prod fall back to lax
+      sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+      maxAge,
+      path: '/',
+      ...(cookieDomain && { domain: cookieDomain }),
+    };
+  }
+
+  /**
+   * GET endpoint for reset-password page
+   * Redirects to frontend reset password page with token in query params
+   * IMPORTANT: This route must be before other @Get routes to avoid conflicts
+   * Route: GET /auth/reset-password?token=...
+   */
+  @Get('reset-password')
+  async getResetPasswordPage(@Query('token') token: string | undefined, @Req() req: any, @Res() res: Response) {
+    this.logger.log(`âœ… GET /auth/reset-password called - Token: ${token ? 'present' : 'missing'}, URL: ${req?.url}`);
+    
+    // Get frontend URL from environment
+    const platformDomain = process.env.PLATFORM_DOMAIN || 'kounworld.com';
+    const frontendUrl = process.env.FRONTEND_URL || `https://${platformDomain}`;
+    const cleanFrontendUrl = frontendUrl.replace(/\/+$/, ''); // Remove trailing slashes
+    
+    // Build redirect URL with token if provided
+    const redirectUrl = token 
+      ? `${cleanFrontendUrl}/auth/reset-password?token=${encodeURIComponent(token)}`
+      : `${cleanFrontendUrl}/auth/reset-password`;
+    
+    this.logger.log(`ًں”„ Redirecting to frontend: ${redirectUrl}`);
+    
+    // Redirect to frontend React app (307 Temporary Redirect preserves method)
+    return res.redirect(307, redirectUrl);
+  }
+
+// Test endpoints removed for security
+
+
+  @Get('security-events')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPER_ADMIN')
+  async getSecurityEvents(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const result = await this.authService.getSecurityEvents({
+        page: page ? parseInt(page) : 1,
+        limit: limit ? parseInt(limit) : 50,
+      });
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to fetch security events:', error);
+      return { logs: [], pagination: { total: 0, page: 1, limit: 50, totalPages: 0 } };
+    }
+  }
+
+  @Get('audit-logs')
+  @UseGuards(JwtAuthGuard)
+  async getAuditLogs(
+    @Req() req: any,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const result = await this.authService.getAuditLogs({
+        page: page ? parseInt(page) : 1,
+        limit: limit ? parseInt(limit) : 50,
+      }, req.user?.role, req.user?.tenantId);
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to fetch audit logs:', error);
+      return { logs: [], pagination: { total: 0, page: 1, limit: 50, totalPages: 0 } };
+    }
+  }
+
+  @Post('signup')
+  async signUp(@Req() req: any, @Res({ passthrough: true }) res: Response, @Body() signUpDto: SignUpDto) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    const fingerprint = signUpDto.fingerprint;
+    
+    try {
+      this.logger.log(`Signup attempt initiated for: ${signUpDto.email}, IP: ${ipAddress}`);
+      const result = await this.authService.signUp(signUpDto, fingerprint, ipAddress);
+      this.logger.log(`Signup successful for: ${signUpDto.email}`);
+      
+      // Set cookies for tokens
+      const cookieOptions = this.getCookieOptions();
+      res.cookie('accessToken', result.accessToken, cookieOptions);
+      res.cookie('refreshToken', result.refreshToken, cookieOptions);
+      
+      return result;
+    } catch (error) {
+      this.logger.error(`Signup failed for ${signUpDto.email}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  async login(@Req() req: any, @Res({ passthrough: true }) res: Response, @Body() loginDto: LoginDto) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'];
+    const fingerprint = loginDto.fingerprint;
+    const identifier = loginDto.email || loginDto.username || 'unknown';
+    
+    // Extract subdomain from headers or body for tenant resolution
+    const subdomain = req.headers['x-subdomain'] || loginDto.subdomain || null;
+    const tenantDomain = req.headers['x-tenant-domain'] || req.headers.host || null;
+    
+    // Check if account is locked
+    const isLocked = await this.rateLimitingService.isAccountLocked(ipAddress, identifier);
+    if (isLocked) {
+      throw new ForbiddenException('Account temporarily locked due to too many failed attempts. Please try again later.');
+    }
+
+    try {
+      this.logger.log(`ًں”گ Login request received for: ${identifier}${subdomain ? ` (subdomain: ${subdomain})` : ''}`);
+      const result = await this.authService.login(loginDto, ipAddress, userAgent, fingerprint, subdomain, tenantDomain);
+      await this.rateLimitingService.recordLoginAttempt(ipAddress, identifier, true);
+      
+      // Set cookies for tokens
+      const cookieOptions = this.getCookieOptions(loginDto.rememberMe);
+      res.cookie('accessToken', result.accessToken, cookieOptions);
+      res.cookie('refreshToken', result.refreshToken, cookieOptions);
+      
+      this.logger.log(`âœ… Login successful for: ${identifier}`);
+      return result;
+    } catch (error: any) {
+      // Enhanced error logging for debugging (Internal logs only, ensure this doesn't leak)
+      this.logger.error(`â‌Œ Login failed for ${identifier}: ${error?.message || 'Unknown error'}`);
+      
+      await this.rateLimitingService.recordLoginAttempt(ipAddress, identifier, false);
+      
+      // Re-throw with original error message
+      throw error;
+    }
+  }
+
+  /**
+   * Recover email using recovery ID (no password needed)
+   * Returns masked email address
+   */
+  @Post('recover-email')
+  @HttpCode(HttpStatus.OK)
+  async recoverEmail(@Body() body: { recoveryId: string }) {
+    if (!body.recoveryId) {
+      throw new ForbiddenException('Recovery ID is required');
+    }
+    return this.authService.recoverEmailByRecoveryId(body.recoveryId);
+  }
+
+  /**
+   * Login using recovery ID and password
+   */
+  @Post('login-recovery')
+  @HttpCode(HttpStatus.OK)
+  async loginWithRecoveryId(
+    @Req() req: any,
+    @Body() body: { recoveryId: string; password: string }
+  ) {
+    if (!body.recoveryId || !body.password) {
+      throw new ForbiddenException('Recovery ID and password are required');
+    }
+    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'];
+    return this.authService.loginWithRecoveryId(body.recoveryId, body.password, ipAddress, userAgent);
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  async refreshTokens(@Req() req: any, @Res({ passthrough: true }) res: Response, @Body('refreshToken') refreshToken?: string) {
+    // Try to get refresh token from cookie if not in body
+    const token = refreshToken || req.cookies?.refreshToken;
+    if (!token) {
+      throw new UnauthorizedException('Refresh token is required');
+    }
+    
+    const result = await this.authService.refreshTokens(token);
+    
+    // Update cookies with new tokens
+    const cookieOptions = this.getCookieOptions();
+    res.cookie('accessToken', result.accessToken, cookieOptions);
+    res.cookie('refreshToken', result.refreshToken, cookieOptions);
+    
+    return result;
+  }
+
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async getMe(@Request() req: any) {
+    const userId = req.user?.userId || req.user?.id;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    const user = await this.authService.getUserProfile(userId);
+
+    return { user };
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  async logout(@Req() req: any, @Res({ passthrough: true }) res: Response) {
+    const userId = req.user?.id || req.user?.sub;
+    const refreshToken = req.cookies?.refreshToken;
+
+    // SECURITY FIX: Invalidate refresh token in database
+    if (refreshToken && userId) {
+      try {
+        await this.authService.invalidateRefreshToken(refreshToken, userId);
+      } catch (error) {
+        // Log but don't fail logout if token invalidation fails
+        this.logger.warn('Failed to invalidate refresh token on logout:', error);
+      }
+    }
+
+    // Clear cookies
+    res.cookie('accessToken', '', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      expires: new Date(0),
+      path: '/',
+    });
+    res.cookie('refreshToken', '', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      expires: new Date(0),
+      path: '/',
+    });
+    
+    return { message: 'Logged out successfully' };
+  }
+
+  @Put('profile')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async updateProfile(
+    @Request() req: any,
+    @Body() updateData: { name?: string; avatar?: string }
+  ) {
+    const userId = req.user?.userId || req.user?.id;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    try {
+      // 1. Try to find in User table
+      let identity: any = await this.authService['prismaService'].user.findUnique({ where: { id: userId } });
+      let identityType: 'user' | 'customerEmployee' | 'customer' = 'user';
+
+      // 2. If not found, try CustomerEmployee
+      if (!identity) {
+        identity = await this.authService['prismaService'].customerEmployee.findUnique({ where: { id: userId } });
+        if (identity) identityType = 'customerEmployee';
+      }
+
+      // 3. If still not found, try Customer
+      if (!identity) {
+        identity = await this.authService['prismaService'].customer.findUnique({ where: { id: userId } });
+        if (identity) identityType = 'customer';
+      }
+
+      if (!identity) throw new NotFoundException('User not found');
+
+      let updatedIdentity: any;
+
+      if (identityType === 'user') {
+        updatedIdentity = await this.authService['prismaService'].user.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+          select: { id: true, email: true, role: true, tenantId: true, avatar: true },
+        });
+      } else if (identityType === 'customerEmployee') {
+        updatedIdentity = await this.authService['prismaService'].customerEmployee.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+        });
+        updatedIdentity = { ...updatedIdentity, role: 'CUSTOMER_EMPLOYEE' };
+      } else if (identityType === 'customer') {
+        updatedIdentity = await this.authService['prismaService'].customer.update({
+          where: { id: userId },
+          data: { avatar: updateData.avatar },
+        });
+        updatedIdentity = { ...updatedIdentity, role: 'CUSTOMER' };
+      }
+
+      this.logger.log(`${identityType} profile updated: ${userId}`);
+      return updatedIdentity;
+    } catch (error) {
+      this.logger.error(`Error updating profile: ${error}`);
+      if (error instanceof NotFoundException) throw error;
+      throw new InternalServerErrorException('Failed to update profile');
+    }
+  }
+
+  @Post('profile/request-update')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async requestProfileUpdate(
+    @Request() req: any,
+    @Body() updateData: { name?: string; avatar?: string; email?: string; username?: string; phone?: string; password?: string }
+  ) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.requestProfileUpdate(userId, updateData);
+  }
+
+  @Post('profile/confirm-update')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async confirmProfileUpdate(
+    @Request() req: any,
+    @Body() body: { code: string }
+  ) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.confirmProfileUpdate(userId, body.code);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Req() req: any, @Body() forgotPasswordDto: any) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+    
+    // Check rate limit for password reset
+    const rateLimit = await this.rateLimitingService.getPasswordResetRateLimiter(ipAddress);
+    if (!rateLimit.allowed) {
+      await this.rateLimitingService.recordSecurityEvent(
+        'RATE_LIMIT_EXCEEDED',
+        'MEDIUM',
+        `Password reset rate limit exceeded for IP: ${ipAddress}`,
+        undefined,
+        undefined,
+        ipAddress,
+        req.headers['user-agent'],
+      );
+      throw new ForbiddenException('Too many password reset attempts. Please try again later.');
+    }
+
+    // Resolve tenant using multiple candidates
+    const tenantId = await this.resolveTenantContext(req);
+    
+    // Pass the resolved ID to the service
+    return this.authService.forgotPassword(forgotPasswordDto, ipAddress, tenantId);
+
+  }
+
+  /**
+   * Send password reset email using recovery ID
+   * This allows users to reset password without knowing their email
+   */
+  @Post('send-reset-by-recovery')
+  @HttpCode(HttpStatus.OK)
+  async sendResetByRecoveryId(@Body() body: { recoveryId: string }) {
+    if (!body.recoveryId) {
+      throw new ForbiddenException('Recovery ID is required');
+    }
+    return this.authService.sendPasswordResetByRecoveryId(body.recoveryId);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Req() req: any, @Body() resetPasswordDto: any) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+    return this.authService.resetPassword(resetPasswordDto, ipAddress);
+  }
+
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async changePassword(@Request() req: any, @Body() changePasswordDto: ChangePasswordDto) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    
+    // CUSTOMER EMPLOYEE ROUTING - Route requests specifically to the CustomerEmployeesService
+    if (req.user?.role === 'CUSTOMER_EMPLOYEE' || req.user?.type === 'customer_employee') {
+      this.logger.log(`🔄 Routing employee password change to CustomerEmployeesService for: ${userId}`);
+      return this.customerEmployeesService.changePassword(
+        userId, 
+        changePasswordDto.currentPassword, 
+        changePasswordDto.newPassword
+      );
+    }
+    
+    // Default to AuthService for regular platform users
+    return this.authService.changePassword(userId, changePasswordDto.currentPassword, changePasswordDto.newPassword);
+  }
+
+  @Get('verify-reset-token')
+  @HttpCode(HttpStatus.OK)
+  async verifyResetToken(@Query('token') token: string) {
+    if (!token) {
+      throw new BadRequestException('Token is required');
+    }
+    return this.authService.verifyResetToken(token);
+  }
+
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  async verifyEmail(@Req() req: any, @Res({ passthrough: true }) res: Response, @Body() body: { email: string; code: string }) {
+    try {
+      this.logger.log(`ًں”گ Email verification attempt for: ${body.email}`);
+      const result = await this.authService.verifySignupCode(body.email, body.code);
+      
+      if (result.valid && result.tokens) {
+        // Set cookies for tokens
+        const cookieOptions = this.getCookieOptions();
+        res.cookie('accessToken', result.tokens.accessToken, cookieOptions);
+        res.cookie('refreshToken', result.tokens.refreshToken, cookieOptions);
+        this.logger.log(`âœ… Email verified successfully for: ${body.email}`);
+      }
+      
+      return result;
+    } catch (error: any) {
+      this.logger.error(`â‌Œ Email verification failed for ${body.email}:`, error);
+      this.logger.error(`Error details:`, {
+        message: error?.message,
+        code: error?.code,
+        status: error?.status,
+        stack: error?.stack,
+      });
+      
+      // Re-throw the error so NestJS can handle it properly
+      if (error?.status) {
+        throw error; // Already a NestJS exception
+      }
+      
+      // Wrap unknown errors
+      throw new InternalServerErrorException(
+        'Email verification failed. Please try again later.'
+      );
+    }
+  }
+
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  async resendVerification(@Req() req: any, @Body() body: { email: string }) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    try {
+      const result = await this.authService.resendVerificationCode(body.email, ipAddress);
+      return {
+        message: 'Verification code resent successfully',
+        email: body.email,
+        // Include previewUrl if available (e.g. for Ethereal in dev)
+        previewUrl: result?.previewUrl,
+        // For development, we can return the code too to match signup behavior
+        code: process.env.NODE_ENV === 'development' ? (result as any).code : undefined,
+      };
+    } catch (error) {
+      this.logger.error(`Resend verification failed for ${body.email}:`, error);
+      throw error;
+    }
+  }
+
+  @Post('verify-reset-code')
+  @HttpCode(HttpStatus.OK)
+  async verifyResetCode(@Body() verifyCodeDto: { email: string; code: string }) {
+    try {
+      const result = await this.authService.verifyResetCode(verifyCodeDto.email, verifyCodeDto.code);
+      return result;
+    } catch (error) {
+      this.logger.error(`Reset code verification failed for ${verifyCodeDto.email}:`, error);
+      throw error;
+    }
+  }
+
+// Test email endpoint removed for security
+
+  @Get('users')
+  @UseGuards(JwtAuthGuard)
+  async getUsers(@Req() req: any) {
+    try {
+      const user = req.user;
+      if (!user) throw new UnauthorizedException('User not authenticated');
+
+      // Security: Filter by tenant unless SUPER_ADMIN
+      const where: any = {};
+      if (user.role !== 'SUPER_ADMIN') {
+          if (!user.tenantId) throw new ForbiddenException('Tenant context required');
+          where.tenantId = user.tenantId;
+      }
+
+      const users = await this.authService['prismaService'].user.findMany({
+        where,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          marketLimit: true,
+          tenantId: true,
+          tenant: {
+            select: {
+              name: true,
+              subdomain: true
+            }
+          },
+          userTenants: {
+            where: { isOwner: true },
+            select: { id: true }
+          }
+        }
+      });
+      
+      // Add currentMarkets count to each user
+      const usersWithMarketCount = users.map((user: any) => ({
+        ...user,
+        currentMarkets: user.userTenants?.length || 0,
+        userTenants: undefined // Remove from response
+      }));
+      
+      return { users: usersWithMarketCount };
+    } catch (error) {
+      return { error: error };
+    }
+  }
+
+  @Get('error-logs')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPER_ADMIN')
+  async getErrorLogs(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      return await this.authService.getErrorLogs({
+        page: page ? parseInt(page) : 1,
+        limit: limit ? parseInt(limit) : 50,
+      });
+    } catch (error) {
+      this.logger.error('Failed to fetch error logs:', error);
+      return { logs: [], pagination: { total: 0, page: 1, limit: 50, totalPages: 0 } };
+    }
+  }
+
+  @Post('error-logs')
+  async createErrorLog(@Body() body: { message: string; stack?: string; context?: string; severity?: string; userId?: string; tenantId?: string; metadata?: any }) {
+    try {
+      await this.authService.logErrorEvent({
+        message: body.message,
+        stack: body.stack,
+        context: body.context,
+        severity: (body.severity as any) || 'HIGH',
+        userId: body.userId,
+        tenantId: body.tenantId,
+        metadata: body.metadata,
+      });
+      return { success: true };
+    } catch (error) {
+      this.logger.error('Failed to create error log:', error);
+      return { success: false, error: String(error) };
+    }
+  }
+
+  @Post('backfill-usernames')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPER_ADMIN')
+  async backfillUsernames() {
+    try {
+      const users = await this.authService['prismaService'].user.findMany({
+        where: { username: null },
+      });
+
+      let updatedCount = 0;
+      for (const user of users) {
+        const username = user.email.split('@')[0].toLowerCase();
+        
+        // Check if username is taken
+        const existing = await this.authService['prismaService'].user.findFirst({
+          where: { username, id: { not: user.id } }
+        });
+
+        if (!existing) {
+          await this.authService['prismaService'].user.update({
+            where: { id: user.id },
+            data: { username },
+          });
+          updatedCount++;
+        }
+      }
+
+      return { 
+        message: 'Usernames backfilled successfully', 
+        total: users.length,
+        updated: updatedCount 
+      };
+    } catch (error) {
+      this.logger.error('Failed to backfill usernames:', error);
+      throw new InternalServerErrorException('Failed to backfill usernames');
+    }
+  }
+
+  // ==================== MARKET MANAGEMENT ====================
+
+  @UseGuards(JwtAuthGuard)
+  @Get('markets')
+  async getUserMarkets(@Request() req: any) {
+    try {
+      this.logger.debug(`getUserMarkets - req.user.id: ${req.user.id}`);
+      if (!req.user) {
+        this.logger.error('getUserMarkets - req.user is undefined');
+        throw new UnauthorizedException('User not authenticated - req.user is undefined');
+      }
+      if (!req.user.id) {
+        this.logger.error('getUserMarkets - req.user.id is undefined');
+        throw new UnauthorizedException('User not authenticated - req.user.id is undefined');
+      }
+      return await this.authService.getUserMarkets(req.user.id);
+    } catch (error) {
+      this.logger.error('Error in getUserMarkets:', error);
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to get user markets. Please try again later.');
+    }
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('markets/limit')
+  async getUserMarketLimit(@Request() req: any) {
+    if (!req.user || !req.user.id) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.getUserMarketLimit(req.user.id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('markets/switch')
+  async switchActiveMarket(
+    @Request() req: any, 
+    @Body() body: { tenantId: string },
+    @Res({ passthrough: true }) res: Response
+  ) {
+    if (!req.user || !req.user.id) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    
+    const result = await this.authService.switchActiveTenant(req.user.id, body.tenantId);
+    
+    // Get the updated user with the new tenantId
+    const user = await this.authService['prismaService'].user.findUnique({
+      where: { id: req.user.id },
+      include: { tenant: true }
+    });
+    
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    
+    // Generate new tokens with the updated tenantId
+    const tokens = await this.authService['generateTokens'](user);
+    
+    // Set cookies with new tokens
+    const cookieOptions = this.getCookieOptions();
+    res.cookie('accessToken', tokens.accessToken, cookieOptions);
+    res.cookie('refreshToken', tokens.refreshToken, cookieOptions);
+    
+    return {
+      ...result,
+      ...tokens,
+      tenantName: user.tenant?.name,
+      tenantSubdomain: user.tenant?.subdomain
+    };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('markets/can-create')
+  async canCreateMarket(@Request() req: any) {
+    try {
+      this.logger.debug(`canCreateMarket - req.user.id: ${req.user.id}`);
+      if (!req.user) {
+        this.logger.error('canCreateMarket - req.user is undefined');
+        throw new UnauthorizedException('User not authenticated - req.user is undefined');
+      }
+      if (!req.user.id) {
+        this.logger.error('canCreateMarket - req.user.id is undefined');
+        throw new UnauthorizedException('User not authenticated - req.user.id is undefined');
+      }
+      return await this.authService.canCreateMarket(req.user.id);
+    } catch (error) {
+      this.logger.error('Error in canCreateMarket:', error);
+      if (error instanceof UnauthorizedException || error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to check market creation eligibility.');
+    }
+  }
+
+  @Post('markets/link')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPER_ADMIN')
+  async linkUserToTenant(@Body() body: { userId: string; tenantId: string }) {
+    return this.authService.linkUserToTenant(body.userId, body.tenantId, true);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('markets/create')
+  async createTenantAndLink(@Request() req: any, @Body() body: { id: string; name: string; subdomain: string; plan?: string; status?: string }) {
+    return this.authService.createTenantAndLink(req.user.id, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Put('markets/:tenantId')
+  async updateMarket(
+    @Request() req: any, 
+    @Param('tenantId') tenantId: string, 
+    @Body() body: { name?: string; logo?: string; subdomain?: string }
+  ) {
+    if (!req.user || !req.user.id) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    // Verify user owns this tenant
+    const userMarkets = await this.authService.getUserMarkets(req.user.id);
+    const userMarket = userMarkets.find((m: any) => m.id === tenantId);
+
+    if (!userMarket || !userMarket.isOwner) {
+      throw new ForbiddenException('You do not have permission to update this market');
+    }
+
+    return this.authService.updateTenant(tenantId, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('markets/:tenantId')
+  async deleteMarket(@Request() req: any, @Param('tenantId') tenantId: string) {
+    if (!req.user || !req.user.id) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    // Verify user owns this tenant
+    const userMarkets = await this.authService.getUserMarkets(req.user.id);
+    const userMarket = userMarkets.find((m: any) => m.id === tenantId);
+
+    if (!userMarket || !userMarket.isOwner) {
+      throw new ForbiddenException('You do not have permission to delete this market');
+    }
+
+    // Prevent deleting the currently active market
+    if (tenantId === req.user.tenantId) {
+      throw new BadRequestException('Cannot delete the currently active market. Please switch to another market first.');
+    }
+
+    // Delete the tenant-user relationship
+    await this.authService['prismaService'].userTenant.deleteMany({
+      where: {
+        userId: req.user.id,
+        tenantId: tenantId,
+      },
+    });
+
+    // If no other users are linked to this tenant, delete the tenant itself
+    const remainingLinks = await this.authService['prismaService'].userTenant.count({
+      where: { tenantId: tenantId },
+    });
+
+    if (remainingLinks === 0) {
+      await this.authService['prismaService'].tenant.delete({
+        where: { id: tenantId },
+      });
+    }
+
+    return { message: 'Market deleted successfully' };
+  }
+
+  // Admin endpoint to update market limit
+  @Put('users/:userId/market-limit')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPER_ADMIN')
+  async updateMarketLimit(@Param('userId') userId: string, @Body() body: { limit: number }) {
+    return this.authService.updateMarketLimit(userId, body.limit);
+  }
+
+  // ==================== TWO-FACTOR AUTHENTICATION ====================
+
+  @Post('2fa/setup')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async setupTwoFactor(@Request() req: any) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.setupTwoFactor(userId);
+  }
+
+  @Post('2fa/enable')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async enableTwoFactor(@Request() req: any, @Body() body: { secret: string; code: string }) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.enableTwoFactor(userId, body.secret, body.code);
+  }
+
+  @Post('2fa/disable')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async disableTwoFactor(@Request() req: any, @Body() body: { code: string }) {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return this.authService.disableTwoFactor(userId, body.code);
+  }
+
+  // New endpoint to verify 2FA during login for Users
+  @Post('login/2fa')
+  @HttpCode(HttpStatus.OK)
+  async verifyLogin2FA(
+    @Req() req: any,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: { customerId: string; code: string }
+  ) {
+    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'];
+    
+    // For Users, we call the AuthService method
+    const result = await this.authService.verifyLogin2FA(body.customerId, body.code, ipAddress, userAgent);
+    
+    // Set cookies for tokens
+    const cookieOptions = (this as any).getCookieOptions();
+    res.cookie('accessToken', result.accessToken, cookieOptions);
+    res.cookie('refreshToken', result.refreshToken, cookieOptions);
+    
+    return result;
+  }
+  /**
+   * Robust tenant resolution helper.
+   * Tries multiple sources (Host, Headers) and validates against database.
+   * If one candidate fails, it tries the next one.
+   */
+  private async resolveTenantContext(req: any): Promise<string | undefined> {
+    const candidates: string[] = [];
+
+    // 1. Priority: Host Header (strict domain isolation)
+    const host = req.headers.host || '';
+    if (host && !host.includes('localhost:3001') && !host.includes('app-auth') && !host.includes('saeaa')) {
+      const parts = host.split('.');
+      if (parts.length > 2 || (host.includes('localhost') && parts.length > 1)) {
+        if (parts[0] !== 'www' && parts[0] !== 'app' && parts[0] !== 'admin') {
+          candidates.push(parts[0]);
+        }
+      }
+    }
+
+    // 2. Secondary: Explicit Tenant Headers
+    if (req.headers['x-tenant-id']) candidates.push(String(req.headers['x-tenant-id']));
+    if (req.headers['x-tenant-domain']) candidates.push(String(req.headers['x-tenant-domain']));
+    if (req.headers['x-subdomain']) candidates.push(String(req.headers['x-subdomain']));
+    if (req.tenantId) candidates.push(String(req.tenantId));
+
+    // Remove empty/default/null values and duplicates
+    const finalCandidates = [...new Set(candidates)]
+      .filter(c => c && c !== 'default' && c !== 'null' && c !== 'undefined' && c !== 'www');
+
+    this.logger.log(`🔍 Resolving tenant from candidates: ${JSON.stringify(finalCandidates)}`);
+
+    for (const raw of finalCandidates) {
+      let clean = raw;
+      if (clean.includes(':')) clean = clean.split(':')[0]; // Remove port
+      if (clean.includes('.localhost')) clean = clean.split('.localhost')[0];
+      
+      let subdomainCandidate = clean;
+      if (clean.includes('.')) {
+        subdomainCandidate = clean.split('.')[0];
+      }
+
+      try {
+        const tenant = await this.prisma.tenant.findFirst({
+          where: {
+            OR: [
+              { id: clean },
+              { subdomain: subdomainCandidate },
+              { subdomain: clean }
+            ]
+          }
+        });
+
+        if (tenant) {
+          this.logger.log(`✅ Tenant matched: ${tenant.name} (${tenant.id}) from candidate "${raw}"`);
+          return tenant.id;
+        }
+      } catch (e: any) {
+        this.logger.warn(`Error checking tenant candidate "${raw}": ${e.message}`);
+      }
+    }
+
+    return undefined;
+  }
+}

@@ -1,0 +1,216 @@
+import { Injectable, ExecutionContext, UnauthorizedException, Logger } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import { Reflector } from '@nestjs/core';
+import * as crypto from 'crypto';
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {
+  private readonly logger = new Logger(JwtAuthGuard.name);
+  private adminApiKeyRequests = new WeakMap<object, boolean>();
+
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private reflector: Reflector,
+  ) {
+    super();
+  }
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest();
+    
+    // -----------------------------------------------------------------
+    // 1. ADMIN API KEY AUTHENTICATION
+    // -----------------------------------------------------------------
+    const adminApiKey = request.headers['x-admin-api-key'] || 
+                       request.headers['X-Admin-API-Key'] ||
+                       request.headers['x-api-key'] || 
+                       request.headers['X-API-Key'] ||
+                       request.headers['x-apikey'] ||
+                       request.headers['X-ApiKey'];
+    
+    if (adminApiKey) {
+      const expectedAdminKey = this.configService.get<string>('ADMIN_API_KEY');
+      
+      if (!expectedAdminKey) {
+        this.logger.error('ADMIN_API_KEY is not configured');
+        throw new UnauthorizedException('Admin API key configuration error');
+      }
+      
+      const MIN_ADMIN_KEY_LENGTH = 16;
+      if (expectedAdminKey.length < MIN_ADMIN_KEY_LENGTH) {
+        this.logger.error('ADMIN_API_KEY is too weak');
+        throw new UnauthorizedException('Admin API key configuration error');
+      }
+
+      const apiKeyBuffer = Buffer.from(String(adminApiKey));
+      const expectedKeyBuffer = Buffer.from(expectedAdminKey);
+      
+      const isMatch = apiKeyBuffer.length === expectedKeyBuffer.length && 
+                      crypto.timingSafeEqual(apiKeyBuffer, expectedKeyBuffer);
+
+      if (isMatch) {
+        const ip = request.ip || request.headers['x-forwarded-for'] || request.socket?.remoteAddress || 'unknown';
+        this.logger.log(`🔑 Admin API key validated successfully from IP: ${ip}`);
+        
+        const tenantId = request.headers['x-tenant-id'] || 
+                        request.headers['X-Tenant-Id'] || 
+                        null;
+
+        request.user = {
+          id: 'system-admin',
+          tenantId: tenantId,
+          role: 'SUPER_ADMIN',
+          email: 'system@admin.local',
+          isAdmin: true
+        };
+        request.tenantId = tenantId;
+        this.adminApiKeyRequests.set(request, true);
+        return true;
+      } else {
+        const ip = request.ip || request.headers['x-forwarded-for'] || request.socket?.remoteAddress || 'unknown';
+        this.logger.warn(`🚫 Invalid admin API key attempt from IP: ${ip} | Path: ${request.url}`);
+        throw new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
+      }
+    }
+    
+    // -----------------------------------------------------------------
+    // 2. JWT TOKEN AUTHENTICATION
+    // -----------------------------------------------------------------
+    try {
+      const authenticated = await (super.canActivate(context) as Promise<boolean>);
+      if (!authenticated) return false;
+
+      const user = request.user;
+      if (user && user.role !== 'SUPER_ADMIN') {
+        const isShopOwner = user.role === 'SHOP_OWNER';
+        const isWriteOperation = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(request.method);
+        const isShopOwnerWrite = isShopOwner && isWriteOperation;
+
+        let requestedTenantId = request.headers['x-tenant-id'] 
+          || request.headers['x-tenant-domain'] 
+          || request.headers['x-subdomain']
+          || request.tenantId;
+
+        if (!requestedTenantId || requestedTenantId === 'default') {
+          const host = request.headers.host || '';
+          if (host && !host.includes('localhost:3001') && !host.includes('app-auth')) {
+            const parts = host.split('.');
+            if (parts.length > 1) {
+              const subdomain = parts[0];
+              if (subdomain !== 'localhost' && subdomain !== 'app' && subdomain !== 'www') {
+                requestedTenantId = subdomain;
+              }
+            }
+          }
+        }
+
+        let normalizedRequestedTenantId = requestedTenantId;
+        if (typeof requestedTenantId === 'string' && requestedTenantId.includes('.')) {
+          const parts = requestedTenantId.split('.');
+          if (requestedTenantId.includes('localhost')) {
+            normalizedRequestedTenantId = parts[0] || 'default';
+          } else if (parts.length >= 2) {
+             const maybeSubdomain = parts[0];
+             if (maybeSubdomain !== 'www' && maybeSubdomain !== 'app') {
+               normalizedRequestedTenantId = maybeSubdomain;
+             }
+          }
+        }
+
+        if (normalizedRequestedTenantId && 
+            normalizedRequestedTenantId !== 'default' && 
+            normalizedRequestedTenantId !== 'localhost' &&
+            user.tenantId) {
+          
+          const matchesId = user.tenantId === normalizedRequestedTenantId;
+          const matchesSubdomain = user.tenant?.subdomain === normalizedRequestedTenantId;
+          
+          if (!matchesId && !matchesSubdomain && !isShopOwnerWrite) {
+            this.logger.warn(`🚫 Tenant mismatch: User ${user.email} (Tenant: ${user.tenantId}) tried to access: ${normalizedRequestedTenantId}`);
+            throw new UnauthorizedException('Access denied: You are logged into a different store. Please log in to this store to continue.');
+          }
+
+          if (isShopOwnerWrite) {
+            this.logger.log(`✅ SHOP_OWNER write operation - skipping tenant match check for store path: ${request.url}`);
+          }
+        }
+      }
+
+      return true;
+    } catch (error: any) {
+      if (error instanceof UnauthorizedException) throw error;
+      
+      // Enhanced error logging
+      const errorName = error?.name || 'Unknown';
+      const errorMessage = error?.message || 'No message';
+      const authHeader = request.headers.authorization;
+      const hasAuthHeader = !!authHeader;
+      const hasCookies = !!request.cookies;
+      const cookieNames = request.cookies ? Object.keys(request.cookies) : [];
+      const hasAccessTokenCookie = !!request?.cookies?.accessToken;
+      
+      this.logger.error(
+        `JWT validation failed in auth service: ${errorName} - ${errorMessage} | ` +
+        `hasAuthHeader: ${hasAuthHeader}, hasCookies: ${hasCookies}, ` +
+        `cookieNames: [${cookieNames.join(', ')}], hasAccessTokenCookie: ${hasAccessTokenCookie} | ` +
+        `endpoint: ${request.url}, method: ${request.method} | ` +
+        `host: ${request.headers.host}, origin: ${request.headers.origin || 'none'}`
+      );
+      
+      if (error.name === 'JsonWebTokenError') {
+         if (error.message?.includes('invalid signature')) {
+            this.logger.error(
+              '🚨 CRITICAL: JWT signature verification failed in auth service - JWT_SECRET mismatch detected! ' +
+              'The JWT_SECRET used to sign tokens does NOT match the JWT_SECRET ' +
+              'used to verify tokens. Ensure JWT_SECRET environment variable is identical in all services.'
+            );
+            throw new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
+         }
+         if (error.message?.includes('jwt expired')) {
+            this.logger.debug('JWT token has expired in auth service');
+            throw new UnauthorizedException('انتهت صلاحية جلسة المستخدم - يرجى تسجيل الدخول مرة أخرى');
+         }
+         if (error.message?.includes('jwt malformed')) {
+            this.logger.warn('JWT token is malformed in auth service');
+            throw new UnauthorizedException('رمز المصادقة غير صالح - يرجى تسجيل الدخول مرة أخرى');
+         }
+         if (error.message?.includes('jwt must be provided')) {
+            this.logger.warn('JWT token was not provided in request to auth service');
+            throw new UnauthorizedException('رمز المصادقة مطلوب - يرجى تسجيل الدخول');
+         }
+         this.logger.error(`Unhandled JsonWebTokenError in auth service: ${errorMessage}`);
+         throw new UnauthorizedException(`فشل المصادقة: ${error.message || 'رمز غير صالح'}`);
+      }
+      
+      this.logger.error(
+        `Unexpected authentication error in auth service: ${errorName} - ${errorMessage} | ` +
+        `Stack: ${error?.stack?.substring(0, 300)}...`
+      );
+      throw new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
+    }
+  }
+
+  handleRequest(err: any, user: any, info: any, context?: ExecutionContext) {
+    if (context) {
+      const request = context.switchToHttp().getRequest();
+      if (this.adminApiKeyRequests.get(request)) {
+        return request.user;
+      }
+    }
+
+    if (err || !user) {
+      if (info?.name === 'TokenExpiredError') {
+        throw new UnauthorizedException('انتهت صلاحية جلسة المستخدم - يرجى تسجيل الدخول مرة أخرى');
+      }
+      if (info?.name === 'JsonWebTokenError') {
+        throw new UnauthorizedException('رمز المصادقة غير صالح - يرجى تسجيل الدخول مرة أخرى');
+      }
+      throw err || new UnauthorizedException('فشل المصادقة - يرجى تسجيل الدخول مرة أخرى');
+    }
+    return user;
+  }
+
+}
